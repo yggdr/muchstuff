@@ -1,9 +1,10 @@
 import asyncio
 import concurrent.futures
 import enum
+from functools import partial
 import sys
 import time
-from typing import Any
+from typing import Awaitable, Any, Callable, Mapping, MutableMapping
 
 from rich.text import Text
 from textual import on, work
@@ -20,14 +21,53 @@ from textual.message import Message
 import repos
 
 
-class VCS_Adapter:
-    def __init__(self, vcs: repos.VCS):
-        self.vcs = vcs
-        self.init_background_task: asyncio.Task | None = None
-        self.diff_background_task: asyncio.Task | None = None
+class RepoManager:
+    def __init__(self, repos: Mapping[str, repos.VCS]):
+        self.repos = repos
+        self._executor = concurrent.futures.ProcessPoolExecutor()
+        self._init_background_tasks: Mapping[str, Awaitable] = {}
+        self._diff_background_tasks: Mapping[str, Awaitable] = {}
+        self.init_results: Mapping[str, str] = {}
+        self.diff_results: Mapping[str, str] = {}
 
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self.vcs, name)
+    async def _background(self, executor, fn, *args, name: str, pre, post, dct: MutableMapping):
+        await pre(name=name)
+        dct[name] = await asyncio.get_running_loop().run_in_executor(executor, fn, *args)
+        await post(dct[name], name=name)
+        return dct[name]
+
+    def background_init(self, pre, post):
+        self._init_background_tasks = {
+            name: asyncio.create_task(
+                self._background(
+                    self._executor,
+                    repo.update_or_clone(),
+                    name=name,
+                    pre=pre,
+                    post=post,
+                    dct=self.init_results,
+                ),
+                name = f'repo update/clone {name}',
+            ) for name, repo in self.repos.items()
+        }
+
+    def background_diff(self, reponame: str, pre, post):
+        difftxt = self.repos[reponame].get_diff_args_from_update_msg(self.init_results[reponame])
+        if difftxt is None:
+            return
+
+        self._diff_background_tasks[reponame] = asyncio.create_task(
+            self._background(
+                self._executor,
+                self.repos[reponame].diff,
+                difftxt,
+                name=reponame,
+                pre=pre,
+                post=post,
+                dct=self.diff_results,
+            ),
+            name = f'repo diff {reponame}',
+        )
 
 
 class DefaultScreen(Screen):
@@ -39,34 +79,25 @@ class DefaultScreen(Screen):
 
     def __init__(self):
         super().__init__()
-        self.repos = {repo.name: VCS_Adapter(repo) for repo in repos.get_repos()}
-        self._executor = concurrent.futures.ProcessPoolExecutor()
+        self._manager = RepoManager({repo.name: repo for repo in repos.get_repos()})
 
     def compose(self):
         with TabbedContent():
-            for reponame in self.repos:
+            for reponame in self._manager.repos:
                 with TabPane(Text.assemble('[', ('U', 'red'), f'] {reponame}'), id=reponame):
-                    # with VerticalScroll():
-                        yield Log(auto_scroll=False)
+                    yield Log(auto_scroll=False)
 
     async def on_mount(self):
         for log in self.query(Log):
             if log.line_count == 0:
                 log.write_line('Pending')
-        await self._start_update_tasks()
+        self._manager.background_init(partial(self._pre, title=('I', 'red')), self._post)
 
     def action_show_updates(self):
-        # import remote_pdb
-        # remote_pdb.set_trace(port=5555)
-        active_pane = self.query_one(TabbedContent).active_pane
-        repo = self.repos[active_pane.id]
-        text_widget = active_pane.query_one(Log)
-        if (difftxt := repo.get_diff_args_from_update_lines(text_widget.lines)) is None:
-            return
-
-        repo.diff_background_task = asyncio.create_task(
-            self._background(self._executor, repo.diff, difftxt, title=('D', 'red'), name=repo.name),
-            name = f'repo diff {repo.name}',
+        self._manager.background_diff(
+            self.query_one(TabbedContent).active_pane.id,
+            partial(self._pre, title=('D', 'red')),
+            self._post,
         )
 
     def action_previous_tab(self):
@@ -77,7 +108,7 @@ class DefaultScreen(Screen):
 
     def set_title(self, title: str | Text | tuple[str, str], *, name: str):
         pid = self.query_one(f'TabPane#{name}').id
-        self.query_one(TabbedContent).get_tab(pid).label = self.repos[name].title = title
+        self.query_one(TabbedContent).get_tab(pid).label = self._manager.repos[name].title = title
 
     async def set_content(self, content: str, *, name: str):
         log = self.query_one(f'TabPane#{name} Log')
@@ -90,16 +121,10 @@ class DefaultScreen(Screen):
                 t1 = t
                 await asyncio.sleep(0)
 
-    async def _start_update_tasks(self):
-        for repo in self.repos.values():
-            repo.init_background_task = asyncio.create_task(
-                self._background(self._executor, repo.update_or_clone(), title=('W', 'red'), name=repo.name),
-                name = f'repo update/clone {repo.name}',
-            )
-
-    async def _background(self, executor, fn, *args, title: str | Text | tuple[str, str] = '', name: str):
+    async def _pre(self, title: str | Text | tuple[str, str] = '', name: str = ''):
         self.set_title(Text.assemble('[', title, f'] {name}'), name=name)
-        result = await asyncio.get_running_loop().run_in_executor(executor, fn, *args)
+
+    async def _post(self, result, title: str | Text | tuple[str, str] = '', name: str = ''):
         self.set_title(Text.assemble('[', ('✔', 'green'), f'] {name}'), name=name)
         await self.set_content(result, name=name)
 
