@@ -1,12 +1,13 @@
+import argparse
 import asyncio
-import concurrent.futures
-import enum
+from collections.abc import Awaitable, Callable, MutableMapping
+import concurrent.futures as cf
 from functools import partial
 import sys
 import time
-from typing import Awaitable, Any, Callable, Mapping, MutableMapping
+from typing import TypeAlias
 
-from rich.text import Text
+import rich.text
 from textual import on, work
 from textual.binding import Binding
 from textual.reactive import reactive
@@ -21,22 +22,25 @@ from textual.message import Message
 import repos
 
 
-class RepoManager:
-    def __init__(self, repos: Mapping[str, repos.VCS]):
-        self.repos = repos
-        self._executor = concurrent.futures.ProcessPoolExecutor()
-        self._init_background_tasks: Mapping[str, Awaitable] = {}
-        self._diff_background_tasks: Mapping[str, Awaitable] = {}
-        self.init_results: Mapping[str, str] = {}
-        self.diff_results: Mapping[str, str] = {}
+GUIText: TypeAlias = str | rich.text.Text | tuple[str, str]
 
-    async def _background(self, executor, fn, *args, name: str, pre, post, dct: MutableMapping):
+
+class RepoManager:
+    def __init__(self, repos: MutableMapping[str, repos.VCS]):
+        self.repos = repos
+        self._executor = cf.ProcessPoolExecutor()
+        self._init_background_tasks: dict[str, Awaitable] = {}
+        self._diff_background_tasks: dict[str, Awaitable] = {}
+        self.init_results: dict[str, str] = {}
+        self.diff_results: dict[str, str] = {}
+
+    async def _background(self, executor: cf.Executor, fn: Callable, *args, name: str, pre: Awaitable, post: Awaitable, dct: MutableMapping):
         await pre(name=name)
         dct[name] = await asyncio.get_running_loop().run_in_executor(executor, fn, *args)
         await post(dct[name], name=name)
         return dct[name]
 
-    def background_init(self, pre, post):
+    def background_init(self, pre: Awaitable, post: Awaitable):
         self._init_background_tasks = {
             name: asyncio.create_task(
                 self._background(
@@ -51,7 +55,7 @@ class RepoManager:
             ) for name, repo in self.repos.items()
         }
 
-    def background_diff(self, reponame: str, pre, post):
+    def background_diff(self, reponame: str, pre: Awaitable, post: Awaitable):
         difftxt = self.repos[reponame].get_diff_args_from_update_msg(self.init_results[reponame])
         if difftxt is None:
             return
@@ -60,7 +64,7 @@ class RepoManager:
             self._background(
                 self._executor,
                 self.repos[reponame].diff,
-                difftxt,
+                *difftxt,
                 name=reponame,
                 pre=pre,
                 post=post,
@@ -79,12 +83,12 @@ class DefaultScreen(Screen):
 
     def __init__(self):
         super().__init__()
-        self._manager = RepoManager({repo.name: repo for repo in repos.get_repos()})
+        self._manager = RepoManager({repo.name: repo for repo in repos.get_repos(self.app._config_path)})
 
     def compose(self):
         with TabbedContent():
             for reponame in self._manager.repos:
-                with TabPane(Text.assemble('[', ('U', 'red'), f'] {reponame}'), id=reponame):
+                with TabPane(rich.text.Text.assemble('[', ('U', 'red'), f'] {reponame}'), id=reponame):
                     yield Log(auto_scroll=False)
 
     async def on_mount(self):
@@ -106,11 +110,11 @@ class DefaultScreen(Screen):
     def action_next_tab(self):
         self.query_one('ContentTabs').action_next_tab()
 
-    def set_title(self, title: str | Text | tuple[str, str], *, name: str):
+    def set_title(self, title: GUIText, *, name: str):
         pid = self.query_one(f'TabPane#{name}').id
         self.query_one(TabbedContent).get_tab(pid).label = self._manager.repos[name].title = title
 
-    async def set_content(self, content: str, *, name: str):
+    async def set_content(self, content: GUIText, *, name: str):
         log = self.query_one(f'TabPane#{name} Log')
         log.clear()
         logwriter = log.write_line
@@ -121,11 +125,11 @@ class DefaultScreen(Screen):
                 t1 = t
                 await asyncio.sleep(0)
 
-    async def _pre(self, title: str | Text | tuple[str, str] = '', name: str = ''):
-        self.set_title(Text.assemble('[', title, f'] {name}'), name=name)
+    async def _pre(self, title: GUIText = '', name: str = ''):
+        self.set_title(rich.text.Text.assemble('[', title, f'] {name}'), name=name)
 
-    async def _post(self, result, title: str | Text | tuple[str, str] = '', name: str = ''):
-        self.set_title(Text.assemble('[', ('✔', 'green'), f'] {name}'), name=name)
+    async def _post(self, result: GUIText, title: GUIText = '', name: str = ''):
+        self.set_title(rich.text.Text.assemble('[', ('✔', 'green'), f'] {name}'), name=name)
         await self.set_content(result, name=name)
 
 
@@ -138,11 +142,23 @@ class ReposApp(App):
         'default': DefaultScreen,
     }
 
+    def __init__(self, config_path: str | None):
+        super().__init__()
+        self._config_path = config_path
+
     def on_mount(self):
         self.push_screen('default')
 
 
-def _run(app, debug):
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-v', '--verbose', action='count', default=0)
+    parser.add_argument('-d', '--debug', action='store_true')
+    parser.add_argument('-e', '--config', default=None)
+    return parser.parse_args()
+
+
+def _run(app: App, debug: bool):
     if debug:
         import aiomonitor
         async def run_async(app):
@@ -155,8 +171,11 @@ def _run(app, debug):
 
 
 def main(args=None) -> int:
-    app = ReposApp()
-    result = _run(app, True)
+    if args is None:
+        args = parse_args()
+
+    app = ReposApp(args.config)
+    result = _run(app, args.debug)
 
     if result is not None:
         print(result)
