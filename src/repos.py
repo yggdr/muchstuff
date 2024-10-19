@@ -1,45 +1,73 @@
 import abc
 from collections.abc import Callable, Generator, Iterable, Mapping
+import importlib
 from os import PathLike
 from pathlib import Path
 import subprocess
 import tomllib
-from typing import Any, ClassVar, Self
+from types import ModuleType
+from typing import Any, cast, ClassVar, Self
 
 
-class VCS(metaclass=abc.ABCMeta):
-    VCS: ClassVar[dict[str, type[Self]]] = {}
-    name: str
-    dest: Path
-    source: Path
+class Repo(metaclass=abc.ABCMeta):
+    pass
 
-    def __init__(self, attrs: Mapping[str, Any]):
-        if not {'name', 'dest', 'source'} < attrs.keys():
-            raise RuntimeError('name, source, and dest are required')
-        self.last_update: str = ''
-        for name, value in attrs.items():
-            setattr(self, name, value)
 
-    @classmethod
-    def get_vcs(cls, vcsname: str, repo_info: dict[str, Any]) -> Self:
-        return cls.VCS[vcsname](repo_info)
+class Diff(metaclass=abc.ABCMeta):
+    pass
 
-    def exec(self, *proc_args: PathLike | str) -> subprocess.CompletedProcess:
-        print('RUNNING')
-        print('!'*100)
-        print(proc_args)
-        self._proc_args = proc_args
-        return subprocess.run(proc_args, capture_output=True, text=True)
 
-    def __init_subclass__(cls, /, name: str, altnames: Iterable[str] | None = None, **kw):
-        super().__init_subclass__(**kw)
-        cls.VCS[name] = cls
-        if altnames is not None:
-            for altname in altnames:
-                cls.VCS[altname] = cls
+class Commit(metaclass=abc.ABCMeta):
+    pass
 
-    def update_or_clone(self) -> Callable[[], str]:
+
+class Engine(metaclass=abc.ABCMeta):
+
+    def __init__(self, vcs: 'VCS'):
+        self.vcs = vcs
+        self.repo: Repo | None = None
+
+    @abc.abstractmethod
+    def clone(self) -> Any:
+        pass
+
+    @abc.abstractmethod
+    def update(self) -> Any:
+        pass
+
+    @abc.abstractmethod
+    def diff(self, *args: str | PathLike) -> Any:
+        pass
+
+    @abc.abstractmethod
+    def commits(self, *args: str) -> Any:
+        pass
+
+    def update_or_clone(self) -> Callable[[], Any]:
         return self.update if self.dest.exists() else self.clone
+
+
+class LibEngine(Engine):
+    @abc.abstractmethod
+    def clone(self, from_, to) -> Repo:
+        pass
+
+    @abc.abstractmethod
+    def update(self) -> Repo:
+        pass
+
+    @abc.abstractmethod
+    def diff(self, *args: str | PathLike) -> Diff:
+        pass
+
+    @abc.abstractmethod
+    def commits(self, *args: str) -> list[Commit]:
+        pass
+
+
+class CLIEngine(Engine):
+    def exec(self, *proc_args: PathLike | str) -> subprocess.CompletedProcess:
+        return subprocess.run(proc_args, capture_output=True, text=True)
 
     @abc.abstractmethod
     def clone(self) -> str:
@@ -51,6 +79,10 @@ class VCS(metaclass=abc.ABCMeta):
 
     @abc.abstractmethod
     def diff(self, *args: str | PathLike) -> str:
+        pass
+
+    @abc.abstractmethod
+    def commits(self, *args: str) -> str:
         pass
 
     @classmethod
@@ -62,51 +94,56 @@ class VCS(metaclass=abc.ABCMeta):
     def get_diff_args_from_update_lines(lines: Iterable[str]) -> tuple[str] | None:
         pass
 
-
-class Git(VCS, name='git'):
-    def clone(self) -> str:
-        # Git clone always outputs to stderr when being piped
-        return self.exec('git', 'clone', self.source, self.dest).stderr
-
-    def update(self) -> str:
-        p = self.exec('git', '-C', self.dest, 'pull')
-        return p.stdout if p.returncode == 0 else p.stderr
-
-    def diff(self, *args: str | PathLike) -> str:
-        return self.exec('git', '-C', self.dest, 'diff', *args).stdout
-
-    @staticmethod
-    def get_diff_args_from_update_lines(lines: Iterable[str]) -> tuple[str] | None:
-        prefix = 'Updating '
-        for line in lines:
-            if line.startswith(prefix):
-                return (line[len(prefix):], )
+    def update_or_clone(self) -> Callable[[], str]:
+        return cast(super().update_or_clone(), Callable[[], str])
 
 
-class Mercurial(VCS, name='mercurial', altnames=['hg']):
-    def clone(self) -> str:
-        p = self.exec('hg', 'clone', self.source, self.dest)
-        return p.stdout if p.returncode == 0 else p.stderr
+class VCS(metaclass=abc.ABCMeta):
+    VCS: ClassVar[dict[str, type[Self]]] = {}
+    name: str
+    dest: Path
+    source: Path
+    _lib: ModuleType | None
 
-    def update(self) -> str:
-        p = self.exec('hg', '--cwd', self.dest, 'pull', '--update')
-        return p.stdout if p.returncode == 0 else p.stderr
+    def __init__(self, attrs: Mapping[str, Any]):
+        if not {'name', 'dest', 'source'} < attrs.keys():
+            raise RuntimeError('name, source, and dest are required')
+        for name, value in attrs.items():
+            setattr(self, name, value)
+        self.engine = self.get_engine()
 
-    def diff(self, *args: str | PathLike) -> str:
-        p = self.exec('hg', '--cwd', self.dest, 'diff', *args)
-        return p.stdout if p.returncode == 0 else p.stderr
+    def get_engine(self) -> Engine:
+        if self._lib is None:
+            return self.CLIEngine(self)
+        else:
+            return self.LibEngine(self)
 
-    def get_diff_args_from_update_lines(lines: Iterable[str]) -> tuple[str] | None:
-        prefix = 'new changesets '
-        for line in lines:
-            if line.startswith(prefix):
-                match line[len(prefix):].split(':'):
-                    case [from_]:
-                        return '--from', f'{from_}^'
-                    case [from_, to]:
-                        return '--from', from_, '--to', to
-                    case _:
-                        raise RuntimeError(f'Mercurial "new changesets" line should not have more than one ":": {line}')
+    @classmethod
+    def get_vcs(cls, vcsname: str, repo_info: dict[str, Any]) -> Self:
+        return cls.VCS[vcsname](repo_info)
+
+    def __init_subclass__(cls, /, name: str, altnames: Iterable[str] | None = None, libname: str | None = None, **kw):
+        super().__init_subclass__(**kw)
+        cls.VCS[name] = cls
+        if altnames is not None:
+            for altname in altnames:
+                cls.VCS[altname] = cls
+
+        if libname is None:
+            cls._lib = None
+        else:
+            try:
+                cls._lib = importlib.import_module(libname)
+            except ImportError:
+                cls._lib = None
+                warnings.warn(f"Cannot find '{libname}' python library. '{name}' repositories will "
+                              "only awailable via the command line interface, limiting available "
+                              "features",
+                              ImportWarning)
+
+    def __getattr__(self, name: str) -> Any:
+        if name in ('clone', 'update', 'diff', 'commits'):
+            return getattr(self.engine, name)
 
 
 def get_repos(configpath: Path | str | None = None) -> Generator[VCS, None, None]:
