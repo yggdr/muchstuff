@@ -16,20 +16,12 @@ class VCS(metaclass=abc.ABCMeta):
     def __init__(self, attrs: Mapping[str, Any]):
         if not {'name', 'dest', 'source'} < attrs.keys():
             raise RuntimeError('name, source, and dest are required')
-        self.last_update: str = ''
         for name, value in attrs.items():
             setattr(self, name, value)
 
     @classmethod
     def get_vcs(cls, vcsname: str, repo_info: dict[str, Any]) -> Self:
         return cls.VCS[vcsname](repo_info)
-
-    def exec(self, *proc_args: PathLike | str) -> subprocess.CompletedProcess:
-        print('RUNNING')
-        print('!'*100)
-        print(proc_args)
-        self._proc_args = proc_args
-        return subprocess.run(proc_args, capture_output=True, text=True)
 
     def __init_subclass__(cls, /, name: str, altnames: Iterable[str] | None = None, **kw):
         super().__init_subclass__(**kw)
@@ -38,8 +30,8 @@ class VCS(metaclass=abc.ABCMeta):
             for altname in altnames:
                 cls.VCS[altname] = cls
 
-    def update_or_clone(self) -> Callable[[], str]:
-        return self.update if self.dest.exists() else self.clone
+    def exec(self, *proc_args: PathLike | str) -> subprocess.CompletedProcess:
+        return subprocess.run(proc_args, capture_output=True, text=True)
 
     @abc.abstractmethod
     def clone(self) -> str:
@@ -53,6 +45,10 @@ class VCS(metaclass=abc.ABCMeta):
     def diff(self, *args: str | PathLike) -> str:
         pass
 
+    @abc.abstractmethod
+    def commits(self, *args: str) -> str:
+        pass
+
     @classmethod
     def get_diff_args_from_update_msg(cls, txt: str) -> tuple[str] | None:
         return cls.get_diff_args_from_update_lines(txt.split('\n'))
@@ -61,6 +57,9 @@ class VCS(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def get_diff_args_from_update_lines(lines: Iterable[str]) -> tuple[str] | None:
         pass
+
+    def update_or_clone(self) -> Callable[[], str]:
+        return self.update if self.dest.exists() else self.clone
 
 
 class Git(VCS, name='git'):
@@ -74,6 +73,12 @@ class Git(VCS, name='git'):
 
     def diff(self, *args: str | PathLike) -> str:
         return self.exec('git', '-C', self.dest, 'diff', *args).stdout
+
+    def commits(self, *args: str, with_diff: bool = False) -> str:
+        log_with_args = ['log']
+        if with_diff:
+            log_with_args.append('-p')
+        return self.exec('git', '-C', self.dest, *log_with_args, *args).stdout
 
     @staticmethod
     def get_diff_args_from_update_lines(lines: Iterable[str]) -> tuple[str] | None:
@@ -95,6 +100,9 @@ class Mercurial(VCS, name='mercurial', altnames=['hg']):
     def diff(self, *args: str | PathLike) -> str:
         p = self.exec('hg', '--cwd', self.dest, 'diff', *args)
         return p.stdout if p.returncode == 0 else p.stderr
+
+    def commits(self, *args: str) -> str:
+        pass
 
     def get_diff_args_from_update_lines(lines: Iterable[str]) -> tuple[str] | None:
         prefix = 'new changesets '

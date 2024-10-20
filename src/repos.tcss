@@ -1,0 +1,20 @@
+$contenttabborder: round steelblue;
+
+ContentSwitcher {
+}
+
+ContentTabs {
+    height: 4;
+}
+
+ContentTab {
+    border: $contenttabborder 20%;
+    padding: 0;
+    height: 3;
+    border-title-align: right;
+    border-subtitle-align: right;
+}
+
+ContentTab.active {
+    border: $contenttabborder 80%;
+}
