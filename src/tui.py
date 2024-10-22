@@ -45,7 +45,7 @@ class VCSWrapper:
 
 class RepoManager:
     def __init__(self, repos: Mapping[str, repos.VCS]):
-        self.repos: MutableMapping[str, VCSWrapper] = {name: VCSWrapper(repo) for name, repo in repos.items()}
+        self.repos: dict[str, VCSWrapper] = {name: VCSWrapper(repo) for name, repo in repos.items()}
         self._executor = cf.ProcessPoolExecutor()
         self._init_background_tasks: dict[str, Awaitable] = {}
         self._diff_background_tasks: dict[str, Awaitable] = {}
@@ -53,6 +53,7 @@ class RepoManager:
         self.init_results: dict[str, str] = {}
         self.diff_results: dict[str, str] = {}
         self.commits_results: dict[str, str] = {}
+        self.commits_diff_results: dict[str, str] = {}
 
     async def _background(self, executor: cf.Executor, fn: Callable, *args, name: str, pre: Callable, post: Callable, dct: MutableMapping | None = None):
         await pre(vcs=self.repos[name])
@@ -108,6 +109,7 @@ class RepoManager:
                 name=reponame,
                 pre=pre,
                 post=post,
+                dct=self.commits_diff_results if with_diff else self.commits_results,
             )
         )
 
@@ -141,45 +143,58 @@ class DefaultScreen(Screen):
         with TabbedContent():
             for reponame in self._manager.repos:
                 with TabPane(reponame, id=reponame):
-                    yield MyLog(auto_scroll=False)
+                    with ContentSwitcher(initial='update', id=reponame):
+                        yield MyLog(id='update', auto_scroll=False)
         yield Footer()
 
     async def on_mount(self):
         # for log in self.query(Log):
         #     if log.line_count == 0:
         #         log.write_line('Pending')
-        self._manager.background_init(self._pre, self._post)
-        self.query_one(TabbedContent).active_pane.query_one(Log).focus()
+        self._manager.background_init(self._pre, partial(self._post, receiver_tab_name="update"))
+        # self.query_one(TabbedContent).active_pane.query_one(ContentSwitcher).visible_content.focus()
 
     @on(TabbedContent.TabActivated)
     def _move_active_class(self, event):
         self.query('ContentTab').remove_class("active")
         event.tab.add_class("active")
-        event.tabbed_content.active_pane.query_one(Log).focus()
+        # event.tabbed_content.active_pane.query_one(ContentSwitcher).visible_content.focus()
 
     async def action_show_update(self):
-        vcsname = self.query_one(TabbedContent).active
-        try:
-            results = self._manager.init_results[vcsname]
-        except KeyError:
-            # results = rich.text.Text.assemble(("No Update available, init not finished?", "red"))
-            results = "No Update available, init not yet finished?"
-        await self._post(results, self._manager.repos[vcsname])
+        self.query_one(TabbedContent).active_pane.query_one(ContentSwitcher).current = 'update'
+        # vcsname = self.query_one(TabbedContent).active
+        # try:
+        #     results = self._manager.init_results[vcsname]
+        # except KeyError:
+        #     # results = rich.text.Text.assemble(("No Update available, init not finished?", "red"))
+        #     results = "No Update available, init not yet finished?"
+        # await self._post(results, "update", self._manager.repos[vcsname])
 
-    def action_show_diff(self):
-        self._manager.background_diff(
-            self.query_one(TabbedContent).active,
-            self._pre,
-            self._post,
-        )
+    async def action_show_diff(self):
+        repopane = self.query_one(TabbedContent).active_pane
+        if repopane.id not in self._manager.diff_results:
+            pane_waiter = self._make_tab(repopane.id, 'diff')
+            self._manager.background_diff(
+                self.query_one(TabbedContent).active,
+                self._pre,
+                partial(self._post, receiver_tab_name="diff"),
+            )
+            await pane_waiter
+        repopane.query_one(ContentSwitcher).current = 'diff'
 
-    def action_show_commits(self, with_diff: bool = False):
-        self._manager.background_commits(
-            self.query_one(TabbedContent).active,
-            self._pre,
-            self._post,
-            with_diff=with_diff,
-        )
+    async def action_show_commits(self, with_diff: bool = False):
+        namestring = 'commitsdiff' if with_diff else 'commits'
+        repopane = self.query_one(TabbedContent).active_pane
+        if repopane.id not in (self._manager.commits_diff_results if with_diff else self._manager.commits_results):
+            pane_waiter = self._make_tab(repopane.id, namestring)
+            self._manager.background_commits(
+                repopane.id,
+                self._pre,
+                partial(self._post, receiver_tab_name=namestring),
+                with_diff=with_diff,
+            )
+            await pane_waiter
+        repopane.query_one(ContentSwitcher).current = namestring
 
     def action_previous_tab(self):
         self.query_one('ContentTabs').action_previous_tab()
@@ -196,8 +211,9 @@ class DefaultScreen(Screen):
         if lower is not None:
             widget.border_subtitle = lower
 
-    async def set_content(self, content: GUIText, *, name: str):
-        log = self.query_one(f'TabPane#{name} Log')
+    async def set_content(self, content: GUIText, *, reponame: str, receiver_tab_name: str):
+        await self._make_tab(reponame, receiver_tab_name)
+        log = self.query_one(f'TabPane#{reponame} Log#{receiver_tab_name}')
         log.clear()
         logwriter = log.write_line
         t1 = time.monotonic()
@@ -232,11 +248,17 @@ class DefaultScreen(Screen):
     async def _pre(self, vcs: VCSWrapper):
         self._set_title_from_states(vcs)
 
-    async def _post(self, result: GUIText, vcs: VCSWrapper):
-        self.query_one(f"TabPane#{vcs.vcs.name} Log").loading = False
+    async def _post(self, result: GUIText, receiver_tab_name: str, vcs: VCSWrapper):
+        self.query_one(f"TabPane#{vcs.vcs.name} Log#{receiver_tab_name}").loading = False
         self._set_title_from_states(vcs)
-        await self.set_content(result, name=vcs.vcs.name)
+        await self.set_content(result, reponame=vcs.vcs.name, receiver_tab_name=receiver_tab_name)
 
+    def _make_tab(self, reponame: str, tabname: str) -> Awaitable:
+        if reponame not in self._manager.repos:
+            raise RuntimeError(f"Cannot create tab for unconfigured repo {reponame}")
+        if self.query(f"TabPane#{reponame} Log#{tabname}"):
+            return asyncio.sleep(0)  # just something awaitable that's essentially do-nothing
+        return self.query_one(f"TabPane#{reponame} ContentSwitcher").add_content(MyLog(id=tabname, auto_scroll=False))
 
 class ReposApp(App):
     CSS_PATH = 'repos.tcss'
