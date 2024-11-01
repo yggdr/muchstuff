@@ -8,7 +8,7 @@ from functools import partial
 from operator import attrgetter
 import sys
 import time
-from typing import Literal, TypeAlias
+from typing import Literal, Self, TypeAlias
 
 import rich.text
 from textual import on, work
@@ -20,7 +20,7 @@ from textual.app import App
 from textual.widgets import ContentSwitcher, Footer, Input, Label, LoadingIndicator, Button, TabbedContent, TabPane, Static, Log
 from textual.screen import ModalScreen, Screen
 # from textual.css.query import NoMatches
-# from textual.message import Message
+from textual.message import Message
 
 import repos
 
@@ -47,11 +47,18 @@ class VCSWrapper:
     diffstate: State = State.initial
     commitsstate: State = State.initial
     commitsdiffstate: State = State.initial
+    state_change_cb: Callable[[Self], ...] | None = None
+
+    def __setattr__(self, name, value):
+        if self.state_change_cb is not None:
+            self.state_change_cb(self)
+
+        super().__setattr__(name, value)
 
 
 class RepoManager:
-    def __init__(self, repos: Mapping[str, repos.VCS]):
-        self.repos: dict[str, VCSWrapper] = {name: VCSWrapper(repo) for name, repo in repos.items()}
+    def __init__(self, repos: Mapping[str, repos.VCS], state_change_cb: Callable | None = None):
+        self.repos: dict[str, VCSWrapper] = {name: VCSWrapper(repo, state_change_cb=state_change_cb) for name, repo in repos.items()}
         self._executor = cf.ProcessPoolExecutor()
         self._background_tasks: dict[Literal[*_pane_types], dict[str, Awaitable]] = {
             'update': {},
@@ -175,9 +182,17 @@ class DefaultScreen(Screen):
         State.finished_error: "red",
     }
 
+    class StateChange(Message):
+        def __init__(self, vcs: VCSWrapper):
+            self.vcs = vcs
+            super().__init__()
+
     def __init__(self):
         super().__init__()
-        self._manager = RepoManager({repo.name: repo for repo in repos.get_repos(self.app._config_path)})
+        self._manager = RepoManager(
+            {repo.name: repo for repo in repos.get_repos(self.app._config_path)},
+            state_change_cb = lambda vcs: self.post_message(self.StateChange(vcs)),
+        )
 
     def compose(self):
         with TabbedContent(id="main"):
@@ -188,16 +203,12 @@ class DefaultScreen(Screen):
         yield Footer()
 
     async def on_mount(self):
-        for vcs in self._manager.repos.values():
-            self._set_title_from_states(vcs)
         self._manager.background_init(partial(self._pre, statename="updatestate"), partial(self._post, receiver_tab=RepoPanes.update))
-        # self.query_one(TabbedContent).active_pane.query_one(ContentSwitcher).visible_content.focus()
 
     @on(TabbedContent.TabActivated)
     def _move_active_class(self, event):
         self.query('ContentTab').remove_class("active")
         event.tab.add_class("active")
-        # event.tabbed_content.active_pane.query_one(ContentSwitcher).visible_content.focus()
 
     async def action_show_pane(self, panename: str):
         try:
@@ -279,24 +290,25 @@ class DefaultScreen(Screen):
             for s, stategetter in self._char_state
         ))
 
-    def _set_title_from_states(self, vcs: VCSWrapper) -> None:
+    @on(StateChange)
+    def _set_title_from_state_change(self, event: StateChange) -> None:
         self.set_title(
-            vcs.vcs.name,
-            upper=self._state_to_upper_str(vcs),
-            lower=self._state_to_lower_str(vcs),
-            name=vcs.vcs.name,
+            event.vcs.vcs.name,
+            upper=self._state_to_upper_str(event.vcs),
+            lower=self._state_to_lower_str(event.vcs),
+            name=event.vcs.vcs.name,
         )
 
     async def _pre(self, vcs: VCSWrapper, statename: str, newstate: State = State.running):
         setattr(vcs, statename, newstate)
-        self._set_title_from_states(vcs)
 
     async def _post(self, result: GUIText, receiver_tab: RepoPanes, vcs: VCSWrapper, success: bool):
-        statename = receiver_tab.name.replace("_", "") + "state"
-
-        setattr(vcs, statename, State.finished_success if success else State.finished_error)
+        setattr(
+            vcs,
+            f"{receiver_tab.name.replace('_', '')}state",
+            State.finished_success if success else State.finished_error,
+        )
         self.query_one(f"TabPane#{vcs.vcs.name} Log#{receiver_tab.name}").loading = False
-        self._set_title_from_states(vcs)
         await self.set_content(result, reponame=vcs.vcs.name, receiver_tab=receiver_tab)
 
     def _make_tab(self, reponame: str, tabname: str) -> Awaitable:
