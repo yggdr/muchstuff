@@ -46,7 +46,7 @@ class VCS(metaclass=abc.ABCMeta):
         pass
 
     @abc.abstractmethod
-    def commits(self, *args: str) -> str:
+    def commits(self, *args: str, with_diff: bool = False) -> str:
         pass
 
     @classmethod
@@ -101,8 +101,19 @@ class Mercurial(VCS, name='mercurial', altnames=['hg']):
         p = self.exec('hg', '--cwd', self.dest, 'diff', *args)
         return p.stdout if p.returncode == 0 else p.stderr
 
-    def commits(self, *args: str) -> str:
-        pass
+    def commits(self, *args: str, with_diff: bool = False) -> str:
+        log_with_args = ['log']
+        if with_diff:
+            log_with_args.append('-p')
+        match args:
+            case ['--from', from_, '--to', to]:
+                new_args = f"{from_}:{to}"
+            case ['--from', from_]:
+                new_args = f"{from_[:-1]}:"
+            case _:
+                raise RuntimeError("UNREACHABLE")
+        p = self.exec('hg', '--cwd', self.dest, *log_with_args, *new_args)
+        return p.stdout if p.returncode == 0 else p.stderr
 
     def get_diff_args_from_update_lines(lines: Iterable[str]) -> tuple[str] | None:
         prefix = 'new changesets '

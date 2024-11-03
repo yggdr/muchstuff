@@ -27,6 +27,9 @@ import repos
 
 GUIText: TypeAlias = str | rich.text.Text | tuple[str, str]
 OptGUIText: TypeAlias = GUIText
+# TODO change to Protocols with __call__?
+PreCallable: TypeAlias = Callable[["VCSWrapper", "State"], Awaitable]
+PostCallable: TypeAlias = Callable[[str, "VCSWrapper", bool], Awaitable]
 
 
 class State(enum.Enum):
@@ -73,15 +76,15 @@ class RepoManager:
             'commits_diff': {},
         }
 
-    async def _background(self, executor: cf.Executor, fn: Callable, *args, name: str, pre: Callable, post: Callable, dct: MutableMapping | None = None):
+    async def _background(self, executor: cf.Executor, fn: Callable, *args, name: str, pre: PreCallable, post: PostCallable, dct: MutableMapping | None = None):
         await pre(vcs=self.repos[name])
         result = await asyncio.get_running_loop().run_in_executor(executor, fn, *args)
-        await post(result, vcs=self.repos[name], success=True)
         if dct is not None:
             dct[name] = result
+        await post(result, vcs=self.repos[name], success=True)
         return result
 
-    def background_init(self, pre: Callable, post: Callable):
+    def background_init(self, pre: PreCallable, post: PostCallable):
         self._background_tasks['update'] = {
             name: asyncio.create_task(
                 self._background(
@@ -96,18 +99,26 @@ class RepoManager:
             ) for name, repo in self.repos.items()
         }
 
+    def runable(self, reponame: str) -> str | Literal[False]:
+        try:
+            difftxt = self.repos[reponame].vcs.get_diff_args_from_update_msg(self.results['update'][reponame])
+        except KeyError:
+            return False
+        if difftxt is None:
+            return False
+        return difftxt
+
     def _background_task_with_diff_args(
         self,
         reponame: str,
         fn: Callable,
-        pre: Callable,
-        post: Callable,
+        pre: PreCallable,
+        post: PostCallable,
         task_dct: MutableMapping,
         result_dct: MutableMapping,
         task_name: str = '',
     ) -> bool:
-        difftxt = self.repos[reponame].vcs.get_diff_args_from_update_msg(self.results['update'][reponame])
-        if difftxt is None:
+        if not (difftxt := self.runable(reponame)):
             return False
 
         task_dct[reponame] = asyncio.create_task(
@@ -124,7 +135,7 @@ class RepoManager:
         )
         return True
 
-    def background_diff(self, reponame: str, pre: Callable, post: Callable) -> bool:
+    def background_diff(self, reponame: str, pre: PreCallable, post: PostCallable) -> bool:
         return self._background_task_with_diff_args(
             reponame,
             self.repos[reponame].vcs.diff,
@@ -135,7 +146,7 @@ class RepoManager:
             task_name=f'repo diff {reponame}'
         )
 
-    def background_commits(self, reponame: str, pre: Callable, post: Callable, with_diff: bool = False) -> bool:
+    def background_commits(self, reponame: str, pre: PreCallable, post: PostCallable, with_diff: bool = False) -> bool:
         return self._background_task_with_diff_args(
             reponame,
             partial(self.repos[reponame].vcs.commits, with_diff=with_diff),
@@ -169,10 +180,10 @@ class DefaultScreen(Screen):
     ]
 
     _char_state = (
-        ('U', attrgetter('updatestate')),
-        ('D', attrgetter('diffstate')),
-        ('C', attrgetter('commitsstate')),
-        ('P', attrgetter('commitsdiffstate')),
+        ('update', 'U', attrgetter('updatestate')),
+        ('diff', 'D', attrgetter('diffstate')),
+        ('commits', 'C', attrgetter('commitsstate')),
+        ('commits_diff', 'P', attrgetter('commitsdiffstate')),
     )
 
     state_colors = {
@@ -183,6 +194,8 @@ class DefaultScreen(Screen):
     }
 
     class StateChange(Message):
+        __match_args__ = ("vcs", )
+
         def __init__(self, vcs: VCSWrapper):
             self.vcs = vcs
             super().__init__()
@@ -204,6 +217,14 @@ class DefaultScreen(Screen):
 
     async def on_mount(self):
         self._manager.background_init(partial(self._pre, statename="updatestate"), partial(self._post, receiver_tab=RepoPanes.update))
+
+        def cs_watcher(cs: ContentSwitcher):
+            self._set_title_from_state_change(self._manager.repos[cs.id])
+
+        for cs in self.query(ContentSwitcher):
+            if cs.id is None:
+                continue
+            self.watch(cs, 'current', partial(cs_watcher, cs))
 
     @on(TabbedContent.TabActivated)
     def _move_active_class(self, event):
@@ -227,9 +248,8 @@ class DefaultScreen(Screen):
         if active_pane.id not in self._manager.results['update']:
             return
 
+        # No need to handle RepoPanes.update as that's handled by the two checks above
         match pane:
-            case RepoPanes.update:
-                bg_running = True
             case RepoPanes.diff:
                 bg_running = self._manager.background_diff(
                     active_pane.id,
@@ -277,26 +297,45 @@ class DefaultScreen(Screen):
                 t1 = t
                 await asyncio.sleep(0)
 
+    def _is_visible_pane(self, vcs: VCSWrapper, panename: Literal[*_pane_types]) -> bool:
+        return self.query_one(f"TabPane#{vcs.vcs.name} ContentSwitcher").current == panename
+
     def _state_to_upper_str(self, vcs: VCSWrapper) -> GUIText:
         return rich.text.Text.assemble(*(
-            (" " if stategetter(vcs) is State.initial else s, self.state_colors[stategetter(vcs)])
-            for s , stategetter in self._char_state
+            (
+                " " if stategetter(vcs) is State.initial else s,
+                self.state_colors[stategetter(vcs)] + (" underline" if self._is_visible_pane(vcs, name) else ""),
+            )
+            for name, s, stategetter in self._char_state
         ))
 
     def _state_to_lower_str(self, vcs: VCSWrapper) -> GUIText:
-        colstr = self.state_colors[State.initial]
         return rich.text.Text.assemble(*(
-            (s if stategetter(vcs) is State.initial else " ", colstr)
-            for s, stategetter in self._char_state
+            (
+                s if stategetter(vcs) is State.initial else " ",
+                self.state_colors[State.finished_success if self._manager.runable(vcs.vcs.name) else State.initial],
+            )
+            for name, s, stategetter in self._char_state
         ))
 
+    @on(TabPane.Focused)
     @on(StateChange)
-    def _set_title_from_state_change(self, event: StateChange) -> None:
+    def _set_title_from_state_change(self, event: StateChange | TabPane.Focused | VCSWrapper) -> None:
+        match event:
+            case self.StateChange(wrapped_vcs):
+                vcs = wrapped_vcs
+            case TabPane.Focused():
+                vcs = self._manager.repos[event.tab_pane.id]
+            case VCSWrapper() as wrapped_vcs:
+                vcs = wrapped_vcs
+            case _:
+                raise RuntimeError("UNREACHABLE")
+
         self.set_title(
-            event.vcs.vcs.name,
-            upper=self._state_to_upper_str(event.vcs),
-            lower=self._state_to_lower_str(event.vcs),
-            name=event.vcs.vcs.name,
+            vcs.vcs.name,
+            upper=self._state_to_upper_str(vcs),
+            lower=self._state_to_lower_str(vcs),
+            name=vcs.vcs.name,
         )
 
     async def _pre(self, vcs: VCSWrapper, statename: str, newstate: State = State.running):
