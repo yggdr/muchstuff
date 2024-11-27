@@ -58,6 +58,11 @@ class VCS(metaclass=abc.ABCMeta):
     def get_diff_args_from_update_lines(lines: Iterable[str]) -> tuple[str] | None:
         pass
 
+    @staticmethod
+    @abc.abstractmethod
+    def split_commits(lines: Iterable[str]) -> list[str]:
+        pass
+
     def update_or_clone(self) -> Callable[[], str]:
         return self.update if self.dest.exists() else self.clone
 
@@ -79,6 +84,20 @@ class Git(VCS, name='git'):
         if with_diff:
             log_with_args.append('-p')
         return self.exec('git', '-C', self.dest, *log_with_args, *args).stdout
+
+    @staticmethod
+    def _check_for_new_commit_start(line):
+        return re.match(r'^commit [a-fA-F0-9]+$', line) is not None
+
+    def split_commits(self, lines: Iterable[str]) -> Generator[str]:
+        commit = []
+        for line in lines:
+            if self._check_for_new_commit_start(line) and commit:
+                yield '\n'.join(commit)
+                commit = [line]
+            else:
+                commit.append(line)
+        yield '\n'.join(commit)
 
     @staticmethod
     def get_diff_args_from_update_lines(lines: Iterable[str]) -> tuple[str] | None:
@@ -114,6 +133,9 @@ class Mercurial(VCS, name='mercurial', altnames=['hg']):
                 raise RuntimeError("UNREACHABLE")
         p = self.exec('hg', '--cwd', self.dest, *log_with_args, *new_args)
         return p.stdout if p.returncode == 0 else p.stderr
+
+    def split_commits():
+        pass
 
     def get_diff_args_from_update_lines(lines: Iterable[str]) -> tuple[str] | None:
         prefix = 'new changesets '

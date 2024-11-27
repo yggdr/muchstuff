@@ -1,25 +1,22 @@
-import argparse
 import asyncio
-from collections.abc import Awaitable, Callable, Mapping, MutableMapping
+from collections.abc import Awaitable, Callable, Iterable, Generator, Mapping, MutableMapping
 import concurrent.futures as cf
 import dataclasses
 import enum
 from functools import partial
 from operator import attrgetter
-import sys
 import time
-from typing import Literal, Self, TypeAlias
+from typing import Any, Literal, Self, TypeAlias
 
 import rich.text
 from textual import on, work
 from textual.binding import Binding
 # from textual.reactive import reactive
 from textual.app import App
-# from textual.containers import Container, HorizontalScroll, Horizontal, Vertical, VerticalScroll
-# from textual.widget import Widget
-from textual.widgets import ContentSwitcher, Footer, Input, Label, LoadingIndicator, Button, TabbedContent, TabPane, Static, Log
+from textual.containers import Container, HorizontalScroll, Horizontal, Vertical, VerticalScroll
+from textual.widgets import Collapsible, ContentSwitcher, Footer, Input, Label, LoadingIndicator, Button, TabbedContent, TabPane, Static, Log, TextArea
 from textual.screen import ModalScreen, Screen
-# from textual.css.query import NoMatches
+from textual.css.query import NoMatches
 from textual.message import Message
 
 import repos
@@ -28,6 +25,7 @@ import repos
 GUIText: TypeAlias = str | rich.text.Text | tuple[str, str]
 OptGUIText: TypeAlias = GUIText
 # TODO change to Protocols with __call__?
+BgCallable: TypeAlias = Callable[[], str]
 PreCallable: TypeAlias = Callable[["VCSWrapper", "State"], Awaitable]
 PostCallable: TypeAlias = Callable[[str, "VCSWrapper", bool], Awaitable]
 
@@ -39,23 +37,28 @@ class State(enum.Enum):
     finished_error = enum.auto()
 
 
-_pane_types = ("update", "diff", "commits", "commits_diff")
-RepoPanes = enum.Enum("RepoPanes", _pane_types)
+class Views(enum.Enum):
+    update = enum.auto()
+    files = enum.auto()
+    diff = enum.auto()
+    commits = enum.auto()
+    commits_diff = enum.auto()
 
 
 @dataclasses.dataclass
 class VCSWrapper:
     vcs: repos.VCS
-    updatestate: State = State.initial
-    diffstate: State = State.initial
-    commitsstate: State = State.initial
-    commitsdiffstate: State = State.initial
-    state_change_cb: Callable[[Self], ...] | None = None
+    update: State = State.initial
+    # Unneeded, files take the data from the diff
+    # files: State = State.initial
+    diff: State = State.initial
+    commits: State = State.initial
+    commits_diff: State = State.initial
+    state_change_cb: Callable[[Self], ...] | None = dataclasses.field(default=None, repr=False, kw_only=True)
 
     def __setattr__(self, name, value):
         if self.state_change_cb is not None:
             self.state_change_cb(self)
-
         super().__setattr__(name, value)
 
 
@@ -63,29 +66,22 @@ class RepoManager:
     def __init__(self, repos: Mapping[str, repos.VCS], state_change_cb: Callable | None = None):
         self.repos: dict[str, VCSWrapper] = {name: VCSWrapper(repo, state_change_cb=state_change_cb) for name, repo in repos.items()}
         self._executor = cf.ProcessPoolExecutor()
-        self._background_tasks: dict[Literal[*_pane_types], dict[str, Awaitable]] = {
-            'update': {},
-            'diff': {},
-            'commits': {},
-            'commits_diff': {},
-        }
-        self.results: dict[Literal[*_pane_types], dict[str, str]] = {
-            'update': {},
-            'diff': {},
-            'commits': {},
-            'commits_diff': {},
-        }
+        self._background_tasks: dict[Views, dict[str, Awaitable]] = {vt: {} for vt in Views}
+        self.results: dict[Views, dict[str, str]] = {vt: {} for vt in Views}
 
-    async def _background(self, executor: cf.Executor, fn: Callable, *args, name: str, pre: PreCallable, post: PostCallable, dct: MutableMapping | None = None):
+    async def _background(self, executor: cf.Executor | None, fn: BgCallable, *args: Any, name: str, pre: PreCallable, post: PostCallable, dct: MutableMapping | None = None):
         await pre(vcs=self.repos[name])
-        result = await asyncio.get_running_loop().run_in_executor(executor, fn, *args)
+        if executor is not None:
+            result = await asyncio.get_running_loop().run_in_executor(executor, fn, *args)
+        else:
+            result = fn(*args)
         if dct is not None:
             dct[name] = result
         await post(result, vcs=self.repos[name], success=True)
         return result
 
     def background_init(self, pre: PreCallable, post: PostCallable):
-        self._background_tasks['update'] = {
+        self._background_tasks[Views.update] = {
             name: asyncio.create_task(
                 self._background(
                     self._executor,
@@ -93,7 +89,7 @@ class RepoManager:
                     name=name,
                     pre=pre,
                     post=post,
-                    dct=self.results['update'],
+                    dct=self.results[Views.update],
                 ),
                 name = f'repo update/clone {name}',
             ) for name, repo in self.repos.items()
@@ -101,7 +97,7 @@ class RepoManager:
 
     def runable(self, reponame: str) -> str | Literal[False]:
         try:
-            difftxt = self.repos[reponame].vcs.get_diff_args_from_update_msg(self.results['update'][reponame])
+            difftxt = self.repos[reponame].vcs.get_diff_args_from_update_msg(self.results[Views.update][reponame])
         except KeyError:
             return False
         if difftxt is None:
@@ -111,7 +107,7 @@ class RepoManager:
     def _background_task_with_diff_args(
         self,
         reponame: str,
-        fn: Callable,
+        fn: BgCallable,
         pre: PreCallable,
         post: PostCallable,
         task_dct: MutableMapping,
@@ -129,7 +125,7 @@ class RepoManager:
                 name=reponame,
                 pre=pre,
                 post=post,
-                dct=result_dct
+                dct=result_dct,
             ),
             name = task_name,
         )
@@ -141,8 +137,8 @@ class RepoManager:
             self.repos[reponame].vcs.diff,
             pre=pre,
             post=post,
-            task_dct=self._background_tasks['diff'],
-            result_dct=self.results['diff'],
+            task_dct=self._background_tasks[Views.diff],
+            result_dct=self.results[Views.diff],
             task_name=f'repo diff {reponame}'
         )
 
@@ -152,21 +148,28 @@ class RepoManager:
             partial(self.repos[reponame].vcs.commits, with_diff=with_diff),
             pre=pre,
             post=post,
-            task_dct=self._background_tasks['commits_diff'] if with_diff else self._background_tasks['commits'],
-            result_dct=self.results['commits_diff'] if with_diff else self.results['commits'],
+            task_dct=self._background_tasks[Views.commits_diff] if with_diff else self._background_tasks[Views.commits],
+            result_dct=self.results[Views.commits_diff] if with_diff else self.results[Views.commits],
             task_name=f'repo commits{"diff" if with_diff else ""} {reponame}',
         )
 
 
-class MyLog(Log):
+# class MyLog(Log):
+class MyVertical(VerticalScroll):
     BINDINGS = [
         Binding('j', 'scroll_down', 'Scroll Down', show=False),
         Binding('k', 'scroll_up', 'Scroll Up', show=False),
     ]
 
-    def __init__(self, *a, **kw):
-        super().__init__(*a, **kw)
-        self.loading = True
+    # def on_mount(self):
+    #     # self.loading = True
+    #     if self.is_on_screen:
+    #         self.focus()
+    #     # self.call_after_refresh(self.set_loading, True)
+
+    # def watch_loading(self, old: bool, new: bool) -> None:
+    #     if self.is_on_screen:
+    #         self.focus()
 
 
 class DefaultScreen(Screen):
@@ -180,10 +183,10 @@ class DefaultScreen(Screen):
     ]
 
     _char_state = (
-        ('update', 'U', attrgetter('updatestate')),
-        ('diff', 'D', attrgetter('diffstate')),
-        ('commits', 'C', attrgetter('commitsstate')),
-        ('commits_diff', 'P', attrgetter('commitsdiffstate')),
+        (Views.update, 'U', attrgetter('update')),
+        (Views.diff, 'D', attrgetter('diff')),
+        (Views.commits, 'C', attrgetter('commits')),
+        (Views.commits_diff, 'P', attrgetter('commits_diff')),
     )
 
     state_colors = {
@@ -196,15 +199,16 @@ class DefaultScreen(Screen):
     class StateChange(Message):
         __match_args__ = ("vcs", )
 
-        def __init__(self, vcs: VCSWrapper):
+        def __init__(self, vcs: VCSWrapper, changed_state: Views):
             self.vcs = vcs
+            self.changed_state = changed_state
             super().__init__()
 
     def __init__(self):
         super().__init__()
         self._manager = RepoManager(
             {repo.name: repo for repo in repos.get_repos(self.app._config_path)},
-            state_change_cb = lambda vcs: self.post_message(self.StateChange(vcs)),
+            state_change_cb = lambda vcs: self.post_message(self.StateChange(vcs, Views.update)),
         )
 
     def compose(self):
@@ -212,11 +216,12 @@ class DefaultScreen(Screen):
             for reponame in self._manager.repos:
                 with TabPane(reponame, id=reponame):
                     with ContentSwitcher(initial='update', id=reponame):
-                        yield MyLog(id='update', auto_scroll=False)
+                        with MyVertical(id='update'):
+                            yield Log(id='update', auto_scroll=False)
         yield Footer()
 
-    async def on_mount(self):
-        self._manager.background_init(partial(self._pre, statename="updatestate"), partial(self._post, receiver_tab=RepoPanes.update))
+    def on_mount(self):
+        self._manager.background_init(partial(self._pre, view=Views.update), partial(self._post, receiver_tab=Views.update))
 
         def cs_watcher(cs: ContentSwitcher):
             self._set_title_from_state_change(self._manager.repos[cs.id])
@@ -230,45 +235,54 @@ class DefaultScreen(Screen):
     def _move_active_class(self, event):
         self.query('ContentTab').remove_class("active")
         event.tab.add_class("active")
+        event.pane.query_exactly_one(ContentSwitcher).visible_content.focus()
 
     async def action_show_pane(self, panename: str):
         try:
-            pane = RepoPanes[panename]
+            pane = Views[panename]
         except KeyError:
-            raise RuntimeError(f'Expected a RepoPanes, got "{type(panename)=}"') from None
+            raise RuntimeError(f'Expected one of {", ".join(v.name for v in Views)}, got "{type(panename)=}"') from None
 
         active_pane = self.query_one(TabbedContent).active_pane
 
         # We already have the data, just switch view
-        if active_pane.id in self._manager.results[pane.name]:
+        if active_pane.id in self._manager.results[pane]:
             active_pane.query_one(ContentSwitcher).current = pane.name
             return
 
         # Initial update hasn't finished yet, so impossible to get the diff args
-        if active_pane.id not in self._manager.results['update']:
+        if active_pane.id not in self._manager.results[Views.update]:
             return
 
-        # No need to handle RepoPanes.update as that's handled by the two checks above
+        # No need to handle Views.update as that's handled by the two checks above
         match pane:
-            case RepoPanes.diff:
-                bg_running = self._manager.background_diff(
+            case Views.files if active_pane.id in self._manager.results[Views.diff]:
+                return
+                await self._pre(self._manager.repos[active_pane.id], view=pane)
+                # self._manager.background_files(
+                #     active_pane.id,
+                #     partial(self._pre, view=pane),
+                #     partial(self._post, receiver_tab=pane, setter=self._files_setter),
+                # )
+            case Views.files | Views.diff:
+                if pane is Views.files:
+                    post = partial(self._post, receiver_tab=pane, setter=self._files_setter)
+                else:
+                    post = partial(self._post, receiver_tab=pane)
+                self._manager.background_diff(
                     active_pane.id,
-                    partial(self._pre, statename="diffstate"),
-                    partial(self._post, receiver_tab=pane),
+                    partial(self._pre, view=pane),
+                    post,
                 )
-            case RepoPanes.commits | RepoPanes.commits_diff:
-                bg_running = self._manager.background_commits(
+            case Views.commits | Views.commits_diff:
+                self._manager.background_commits(
                     active_pane.id,
-                    partial(self._pre, statename=f"commits{'' if pane is RepoPanes.commits else 'diff'}state"),
-                    partial(self._post, receiver_tab=pane),
-                    with_diff=False if pane is RepoPanes.commits else True,
+                    partial(self._pre, view=pane),
+                    partial(self._post, receiver_tab=pane, setter=self._commit_setter),
+                    with_diff=False if pane is Views.commits else True,
                 )
             case _:
                 raise RuntimeError("UNREACHABLE")
-
-        if bg_running:
-            await self._make_tab(active_pane.id, pane.name)
-            active_pane.query_one(ContentSwitcher).current = pane.name
 
     def action_previous_tab(self):
         self.query_one('ContentTabs').action_previous_tab()
@@ -285,9 +299,13 @@ class DefaultScreen(Screen):
         if lower is not None:
             widget.border_subtitle = lower
 
-    async def set_content(self, content: GUIText, *, reponame: str, receiver_tab: RepoPanes):
-        await self._make_tab(reponame, receiver_tab.name)
-        log = self.query_one(f'TabPane#{reponame} Log#{receiver_tab.name}')
+    async def set_content(self, content: GUIText, *, reponame: str, receiver_tab: Views):
+        # await self._make_tab(reponame, receiver_tab.name)
+        try:
+            log = self.query_exactly_one(f'TabPane#{reponame} MyVertical#{receiver_tab.name} Log#{receiver_tab.name}')
+        except NoMatches:
+            log = Log(id=receiver_tab.name, auto_scroll=False)
+            self.query_exactly_one(f'TabPane#{reponame} MyVertical#{receiver_tab.name}').mount(log)
         log.clear()
         logwriter = log.write_line
         t1 = time.monotonic()
@@ -297,35 +315,32 @@ class DefaultScreen(Screen):
                 t1 = t
                 await asyncio.sleep(0)
 
-    def _is_visible_pane(self, vcs: VCSWrapper, panename: Literal[*_pane_types]) -> bool:
-        return self.query_one(f"TabPane#{vcs.vcs.name} ContentSwitcher").current == panename
+    def _is_visible_pane(self, vcs: VCSWrapper, view: Views) -> bool:
+        return self.query_one(f"TabPane#{vcs.vcs.name} ContentSwitcher").current == view.name
 
     def _state_to_upper_str(self, vcs: VCSWrapper) -> GUIText:
         return rich.text.Text.assemble(*(
             (
-                " " if stategetter(vcs) is State.initial else s,
-                self.state_colors[stategetter(vcs)] + (" underline" if self._is_visible_pane(vcs, name) else ""),
+                " " if stategetter(vcs) is State.initial else sign,
+                self.state_colors[stategetter(vcs)] + (" underline" if self._is_visible_pane(vcs, view) else ""),
             )
-            for name, s, stategetter in self._char_state
+            for view, sign, stategetter in self._char_state
         ))
 
     def _state_to_lower_str(self, vcs: VCSWrapper) -> GUIText:
         return rich.text.Text.assemble(*(
             (
-                s if stategetter(vcs) is State.initial else " ",
+                sign if stategetter(vcs) is State.initial else " ",
                 self.state_colors[State.finished_success if self._manager.runable(vcs.vcs.name) else State.initial],
             )
-            for name, s, stategetter in self._char_state
+            for _, sign, stategetter in self._char_state
         ))
 
-    @on(TabPane.Focused)
     @on(StateChange)
-    def _set_title_from_state_change(self, event: StateChange | TabPane.Focused | VCSWrapper) -> None:
+    def _set_title_from_state_change(self, event: StateChange | VCSWrapper) -> None:
         match event:
             case self.StateChange(wrapped_vcs):
                 vcs = wrapped_vcs
-            case TabPane.Focused():
-                vcs = self._manager.repos[event.tab_pane.id]
             case VCSWrapper() as wrapped_vcs:
                 vcs = wrapped_vcs
             case _:
@@ -338,24 +353,65 @@ class DefaultScreen(Screen):
             name=vcs.vcs.name,
         )
 
-    async def _pre(self, vcs: VCSWrapper, statename: str, newstate: State = State.running):
-        setattr(vcs, statename, newstate)
+    # @on(StateChange)
+    # def _set_pane_loading(self, event: StateChange):
+    #     getattr(event.vcs, event.changed_state.name)
+    #     self.query_exactly_one(f"ContentSwitcher#{event.vcs.vcs.name} > MyVertical")
 
-    async def _post(self, result: GUIText, receiver_tab: RepoPanes, vcs: VCSWrapper, success: bool):
+    async def _pre(self, vcs: VCSWrapper, view: Views, newstate: State = State.running):
+        await self._make_tab(vcs.vcs.name, view.name)
+        self.query_one(TabbedContent).active_pane.query_one(ContentSwitcher).current = view.name
+        setattr(vcs, view.name, newstate)
+
+    async def _files_diff_pre(self, pre: PreCallable) -> PreCallable:
+        pass
+
+    async def _post(self, result: GUIText, *, receiver_tab: Views, setter: Callable[..., Awaitable] = None, vcs: VCSWrapper, success: bool):
+        if setter is None:
+            setter = self.set_content
         setattr(
             vcs,
-            f"{receiver_tab.name.replace('_', '')}state",
+            receiver_tab.name,
             State.finished_success if success else State.finished_error,
         )
-        self.query_one(f"TabPane#{vcs.vcs.name} Log#{receiver_tab.name}").loading = False
-        await self.set_content(result, reponame=vcs.vcs.name, receiver_tab=receiver_tab)
+        self.query_exactly_one(f"TabPane#{vcs.vcs.name} MyVertical#{receiver_tab.name}").loading = False
+        await setter(result, reponame=vcs.vcs.name, receiver_tab=receiver_tab)
+
+    async def _common_setter(
+        self,
+        raw_content: GUIText,
+        reponame: str,
+        receiver_tab: Views,
+        title_splitter: Callable[[Iterable[str]], Generator[tuple[str, str]]],
+    ):
+        # await self._make_tab(reponame, receiver_tab.name)
+        pane_vert = self.query_exactly_one(f'TabPane#{reponame} MyVertical#{receiver_tab.name}')
+        if not pane_vert.query(Collapsible):
+            pane_vert.mount_all(
+                Collapsible(Static(rest), title=fst, collapsed=False)
+                for fst, rest in title_splitter(self._manager.repos[reponame].vcs.split_commits(raw_content.split("\n")))
+            )
+
+    async def _commit_setter(self, raw_content: GUIText, *, reponame: str, receiver_tab: Literal[Views.commits, Views.commits_diff]):
+        def _split_first(input: Iterable[str]) -> Generator[tuple[str, str]]:
+            for in_ in input:
+                fst, *rest = in_.split('\n')
+                yield fst, '\n'.join(rest)
+
+        await self._common_setter(raw_content, reponame, receiver_tab, _split_first)
+
+    async def _files_setter(self, raw_content: GUIText, *, reponame: str, receiver_tab: Literal[Views.files]):
+        def _split_fname(input):
+            yield "", ""
+
+        await self._common_setter(raw_content, reponame, receiver_tab, _split_fname)
 
     def _make_tab(self, reponame: str, tabname: str) -> Awaitable:
         if reponame not in self._manager.repos:
             raise RuntimeError(f"Cannot create tab for unconfigured repo {reponame}")
-        if self.query(f"TabPane#{reponame} Log#{tabname}"):
+        if self.query(f"TabPane#{reponame} MyVertical#{tabname}"):
             return asyncio.sleep(0)  # just something awaitable that's essentially do-nothing
-        return self.query_one(f"TabPane#{reponame} ContentSwitcher").add_content(MyLog(id=tabname, auto_scroll=False))
+        return self.query_one(f"TabPane#{reponame} ContentSwitcher").add_content(MyVertical(id=tabname))
 
 
 class ReposApp(App):
@@ -374,47 +430,6 @@ class ReposApp(App):
     def on_mount(self):
         self.push_screen('default')
 
-
-def parse_args():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('-v', '--verbose', action='count', default=0)
-    parser.add_argument('-d', '--debug', action='store_true')
-    parser.add_argument('-g', '--config', default=None)
-    return parser.parse_args()
-
-
-def _run(app: App, debug: bool):
-    if debug:
-        import aiomonitor
-        from aiomonitor.termui.commands import auto_command_done, monitor_cli, print_ok
-
-        @monitor_cli.command(name='hello')
-        @auto_command_done
-        def do_hello(ctx):
-            print_ok('Hi!')
-
-        async def run_async(app):
-            loop = asyncio.get_running_loop()
-            with aiomonitor.start_monitor(loop, locals=locals() | {"s": asyncio.sleep}):
-                return await app.run_async()
-        return asyncio.run(run_async(app))
-    else:
-        return app.run()
-
-
-def main(args=None) -> int:
-    if args is None:
-        args = parse_args()
-
-    app = ReposApp(args.config)
-    result = _run(app, args.debug)
-
-    if result is not None:
-        print(result)
-
-    return app.return_code
-
-
-if __name__ == "__main__":
-    import sys
-    sys.exit(main())
+    def _debug_run(self):
+        from _debug import run_async_debug
+        return asyncio.run(run_async_debug(self))
