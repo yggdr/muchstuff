@@ -2,9 +2,12 @@ import abc
 from collections.abc import Callable, Generator, Iterable, Mapping
 from os import PathLike
 from pathlib import Path
+import re
 import subprocess
 import tomllib
 from typing import Any, ClassVar, Self
+
+import unidiff
 
 
 class VCS(metaclass=abc.ABCMeta):
@@ -98,6 +101,22 @@ class Git(VCS, name='git'):
             else:
                 commit.append(line)
         yield '\n'.join(commit)
+
+    def split_files(self, lines: Iterable[str]) -> Generator[str]:
+        # import remote_pdb; remote_pdb.set_trace(port=11223)
+        for pfile in unidiff.PatchSet(line+'\n' for line in lines):
+            if pfile.is_added_file:
+                title = f"A {pfile.path}"
+            elif pfile.is_removed_file:
+                title = f"R {pfile.path}"
+            elif pfile.is_modified_file:
+                title = f"M {pfile.path}"
+            elif pfile.is_rename:
+                title = f"{pfile.source_file} -> {pfile.target_file}"
+            else:
+                raise RuntimeError('UNREACHABLE')
+
+            yield f"{title}\n{pfile}"
 
     @staticmethod
     def get_diff_args_from_update_lines(lines: Iterable[str]) -> tuple[str] | None:

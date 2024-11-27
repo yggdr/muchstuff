@@ -142,6 +142,23 @@ class RepoManager:
             task_name=f'repo diff {reponame}'
         )
 
+    def background_files(self, reponame: str, pre: PreCallable, post: PostCallable) -> list[str]:
+        def _files():
+            return (self.repos[reponame].vcs.split_files(self.results[Views.diff][reponame].split('\n')))
+
+        self._background_tasks[Views.files][reponame] = asyncio.create_task(
+            self._background(
+                None,
+                _files,
+                name=reponame,
+                pre=pre,
+                post=post,
+                dct=self.results[Views.files],
+            ),
+            name = f'files diff {reponame}'
+        )
+        return True
+
     def background_commits(self, reponame: str, pre: PreCallable, post: PostCallable, with_diff: bool = False) -> bool:
         return self._background_task_with_diff_args(
             reponame,
@@ -175,6 +192,7 @@ class MyVertical(VerticalScroll):
 class DefaultScreen(Screen):
     BINDINGS = [
         ('u', 'show_pane("update")', 'Show update'),
+        ('f', 'show_pane("files")', 'Show update'),
         ('d', 'show_pane("diff")', 'Show diff'),
         ('c', 'show_pane("commits")', 'Show commits'),
         ('p', 'show_pane("commits_diff")', 'Show commits w/ patch'),
