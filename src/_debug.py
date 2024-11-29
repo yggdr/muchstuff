@@ -113,5 +113,5 @@ async def run_async_debug(myapp):
     from tui import Views
     app = myapp
     loop = asyncio.get_running_loop()
-    with aiomonitor.start_monitor(loop, locals=locals() | {"s": asyncio.sleep, "V": Views}):
+    with aiomonitor.start_monitor(loop, locals=locals() | {"app": app, "s": asyncio.sleep, "V": Views}):
         return await app.run_async()

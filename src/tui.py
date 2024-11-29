@@ -143,13 +143,10 @@ class RepoManager:
         )
 
     def background_files(self, reponame: str, pre: PreCallable, post: PostCallable) -> list[str]:
-        def _files():
-            return (self.repos[reponame].vcs.split_files(self.results[Views.diff][reponame].split('\n')))
-
         self._background_tasks[Views.files][reponame] = asyncio.create_task(
             self._background(
                 None,
-                _files,
+                lambda: list(self.repos[reponame].vcs.split_files(self.results[Views.diff][reponame].split('\n'))),
                 name=reponame,
                 pre=pre,
                 post=post,
@@ -275,23 +272,25 @@ class DefaultScreen(Screen):
         # No need to handle Views.update as that's handled by the two checks above
         match pane:
             case Views.files if active_pane.id in self._manager.results[Views.diff]:
-                return
                 await self._pre(self._manager.repos[active_pane.id], view=pane)
-                # self._manager.background_files(
-                #     active_pane.id,
-                #     partial(self._pre, view=pane),
-                #     partial(self._post, receiver_tab=pane, setter=self._files_setter),
-                # )
-            case Views.files | Views.diff:
-                if pane is Views.files:
-                    post = partial(self._post, receiver_tab=pane, setter=self._files_setter)
-                else:
-                    post = partial(self._post, receiver_tab=pane)
-                self._manager.background_diff(
+                self._manager.background_files(
                     active_pane.id,
                     partial(self._pre, view=pane),
-                    post,
+                    partial(self._post, receiver_tab=pane, setter=self._files_setter),
                 )
+            case Views.files | Views.diff:
+                difffunc = partial(
+                    self._manager.background_diff,
+                    active_pane.id,
+                    partial(self._pre, view=pane),
+                )
+                if pane is Views.files:
+                    return
+                    difffunc = partial(difffunc, partial(self._post, receiver_tab=pane, setter=self._files_setter))
+                    await self.action_show_pane(Views.diff)
+                else:
+                    difffunc = partial(difffunc, partial(self._post, receiver_tab=pane))
+                difffunc()
             case Views.commits | Views.commits_diff:
                 self._manager.background_commits(
                     active_pane.id,
