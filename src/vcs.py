@@ -63,7 +63,7 @@ class VCS(metaclass=abc.ABCMeta):
 
     @staticmethod
     @abc.abstractmethod
-    def split_commits(lines: Iterable[str]) -> list[str]:
+    def split_into_commits(lines: Iterable[str]) -> list[str]:
         pass
 
     def update_or_clone(self) -> Callable[[], str]:
@@ -92,7 +92,7 @@ class Git(VCS, name='git'):
     def _check_for_new_commit_start(line):
         return re.match(r'^commit [a-fA-F0-9]+$', line) is not None
 
-    def split_commits(self, lines: Iterable[str]) -> Generator[str]:
+    def split_into_commits(self, lines: Iterable[str]) -> Generator[str]:
         commit = []
         for line in lines:
             if self._check_for_new_commit_start(line) and commit:
@@ -102,7 +102,7 @@ class Git(VCS, name='git'):
                 commit.append(line)
         yield '\n'.join(commit)
 
-    def split_files(self, lines: Iterable[str]) -> Generator[str]:
+    def split_into_files(self, lines: Iterable[str]) -> Generator[str]:
         # import remote_pdb; remote_pdb.set_trace(port=11223)
         for pfile in unidiff.PatchSet(line+'\n' for line in lines):
             if pfile.is_added_file:
@@ -153,7 +153,7 @@ class Mercurial(VCS, name='mercurial', altnames=['hg']):
         p = self.exec('hg', '--cwd', self.dest, *log_with_args, *new_args)
         return p.stdout if p.returncode == 0 else p.stderr
 
-    def split_commits():
+    def split_into_commits():
         pass
 
     def get_diff_args_from_update_lines(lines: Iterable[str]) -> tuple[str] | None:

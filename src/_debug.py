@@ -35,7 +35,7 @@ def widget_tree(root: Widget, indent: int = 0, increase: int = 4, ignore: Iterab
 
 
 def _tasks(task_type: str):
-    from tui import Views
+    from tui import TaskType
     table = [('Type', 'Repo Name', 'Task ID', 'State')]
     match task_type:
         case 'all':
@@ -43,7 +43,7 @@ def _tasks(task_type: str):
                 for reponame, task in repos.items():
                     table.append((vtype, reponame, str(id(task)), task._state))
         case 'update' | 'files' | 'diff' | 'commits' | 'commits_diff':
-            for reponame, task in app.screen._manager._background_tasks[Views[task_type]].items():
+            for reponame, task in app.screen._manager._background_tasks[TaskType[task_type]].items():
                 table.append((task_type, reponame, str(id(task)), task._state))
         case _:
             return 'invalid task_type'
@@ -60,8 +60,8 @@ def do_widget_tree(ctx):
 
 
 def task_type_completer(ctx, param, incomplete):
-    from tui import Views
-    return [vtype.name for vtype in Views if vtype.name.startswith(incomplete)]
+    from tui import TaskType
+    return [vtype.name for vtype in TaskType if vtype.name.startswith(incomplete)]
 
 
 def repo_name_completer(ctx, param, incomplete):
@@ -72,9 +72,9 @@ def repo_name_completer(ctx, param, incomplete):
 @click.argument('repo_name', shell_complete=repo_name_completer)
 @auto_command_done
 def taskps(ctx, task_type: str, repo_name: str):
-    from tui import Views
+    from tui import TaskType
     try:
-        task = app.screen._manager._background_tasks[Views[task_type]][repo_name]
+        task = app.screen._manager._background_tasks[TaskType[task_type]][repo_name]
     except LookupError as lue:
         return f"No such task: {lue}"
 
@@ -110,8 +110,8 @@ async def run_async_debug(myapp):
     import remote_pdb
     from functools import partial
     sys.breakpointhook = partial(remote_pdb.set_trace, port=11223)
-    from tui import Views
+    from tui import TaskType
     app = myapp
     loop = asyncio.get_running_loop()
-    with aiomonitor.start_monitor(loop, locals=locals() | {"app": app, "s": asyncio.sleep, "V": Views}):
+    with aiomonitor.start_monitor(loop, locals=locals() | {"app": app, "s": asyncio.sleep, "T": TaskType}):
         return await app.run_async()
