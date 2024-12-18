@@ -1,22 +1,27 @@
 import asyncio
-from collections.abc import Awaitable, Callable, Iterable, Generator
+from collections.abc import Awaitable, Callable, Generator
+from contextlib import suppress
 import dataclasses
 from functools import partial
+import itertools as it
 from operator import attrgetter
 import time
-from typing import Literal, TypeAlias
+from typing import TypeAlias
 
 import rich.text
 from textual import on, work
 from textual.binding import Binding
 # from textual.reactive import reactive
 from textual.app import App
-from textual.containers import Container, HorizontalScroll, Horizontal, Vertical, VerticalScroll
-from textual.widgets import Collapsible, ContentSwitcher, Footer, Input, Label, LoadingIndicator, Button, TabbedContent, TabPane, Static, Log, TextArea
+from textual.containers import Container, HorizontalScroll, Horizontal, Right, Vertical, VerticalScroll
+from textual.command import SearchIcon
+from textual.widgets import Collapsible, ContentSwitcher, Footer, Input, Label, LoadingIndicator, Button, OptionList, TabbedContent, TabPane, Static, Log, TextArea
 from textual.screen import ModalScreen, Screen
 from textual.css.query import NoMatches
 from textual.message import Message
-from textual.message_pump import MessagePump
+# from textual.message_pump import MessagePump
+from textual.suggester import SuggestFromList
+from textual.events import DescendantFocus, Focus
 
 import vcs
 from manager import RepoManager, PreCallable, TaskState, VCSWrapper, TaskType
@@ -27,12 +32,56 @@ OptGUIText: TypeAlias = GUIText
 # TODO change to Protocols with __call__?
 
 
-# class MyLog(Log):
 class MyVertical(VerticalScroll):
     BINDINGS = [
-        Binding('j', 'scroll_down', 'Scroll Down', show=False),
-        Binding('k', 'scroll_up', 'Scroll Up', show=False),
+        Binding('j', 'down', 'Scroll Down', show=False),
+        Binding('k', 'up', 'Scroll Up', show=False),
+        ('o', 'toggle_open_all', 'Toggle Open All'),
+        ('ctrl+d', 'half_down', 'Half Page Down'),
+        ('ctrl+u', 'half_up', 'Half Page Up'),
     ]
+
+    last_focused = None
+
+    def action_down(self):
+        if self.has_class('collapsible'):
+            self.app.action_focus_next()
+        else:
+            self.action_scroll_down()
+
+    def action_up(self):
+        if self.has_class('collapsible'):
+            self.app.action_focus_previous()
+        else:
+            self.action_scroll_up()
+
+    def action_toggle_open_all(self):
+        for c in self.query(Collapsible):
+            c.collapsed = not c.collapsed
+
+    def check_action(self, action: str, params) -> bool:
+        if action in ('close_all', 'open_all') and not self.has_class('collapsible'):
+            return False
+        return True
+
+    def action_half_down(self):
+        self.scroll_to(y=self.scroll_y + self.scrollable_content_region.height / 2)
+
+    def action_half_up(self):
+        self.scroll_to(y=self.scroll_y - self.scrollable_content_region.height / 2)
+
+    @on(Focus)
+    def focus_collapsible(self, event: Focus | None):
+        if self.last_focused is not None:
+            self.last_focused.focus()
+        else:
+            with suppress(NoMatches):
+                self.query("CollapsibleTitle").first().focus()
+
+    @on(DescendantFocus)
+    def focus_within(self, event: DescendantFocus):
+        if isinstance(event.widget.parent, Collapsible):
+            self.last_focused = event.widget
 
     # def on_mount(self):
     #     # self.loading = True
@@ -50,11 +99,63 @@ class StateChange(Message):
     vcs: VCSWrapper
 
 
-@dataclasses.dataclass
-class BackgroundTaskChange(Message):
-    task_type: TaskType
-    state: TaskState
-    result: GUIText | Exception | None = None
+class Errors(ModalScreen):
+    BINDINGS = [
+        ('escape', 'dismiss')
+    ]
+
+    def __init__(self):
+        super().__init__()
+        self._errors: list[tuple[str, Exception]] = []
+
+    def add_error(self, taskname: str, exception: Exception):
+        self._errors.append((taskname, exception))
+        with suppress(NoMatches):
+            self.query_exactly_one(VerticalScroll).mount(
+                self._error_view(taskname, exception)
+            )
+
+    def compose(self):
+        with VerticalScroll(id='errorscontainer'):
+            for taskname, exception in self._errors:
+                yield self._error_view(taskname, exception)
+
+    def _error_view(self, taskname: str, exception: Exception):
+        return Collapsible(Static(repr(exception)), title=taskname, collapsed=False)
+
+
+class SearchScreen(ModalScreen):
+    BINDINGS = [
+        ('escape', 'dismiss'),
+    ]
+
+    def __init__(self, suggestvals, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._suggestvals = suggestvals
+
+    def compose(self):
+        with Vertical(classes='searchbackground'):
+            with Horizontal(classes='searchbackground'):
+                yield SearchIcon()
+                yield Input(id='searchinput', placeholder="Reponame", suggester=SuggestFromList(self._suggestvals))
+            with Vertical(classes='candidatesbackground'):
+                yield OptionList(*self._suggestvals)
+
+    @on(Input.Submitted)
+    def search(self, event: Input.Submitted):
+        if event.value in self._suggestvals:
+            self.dismiss(event.value)
+        else:
+            event.input.styles.animate('background',
+                value='red',
+                duration=.1,
+                easing='in_expo',
+                on_complete=partial(event.input.styles.animate, 'background',
+                    value=event.input.styles.background,
+                    duration=.6,
+                    easing='out_sine',
+                )
+            )
 
 
 class DefaultScreen(Screen):
@@ -65,6 +166,7 @@ class DefaultScreen(Screen):
         ('p', 'show_pane("commits_diff")', 'Show commits w/ patch'),
         ('h', 'previous_tab', 'Previous Tab'),
         ('l', 'next_tab', 'Next Tab'),
+        ('/', 'search', 'Search'),
     ]
 
     _char_state = (
@@ -104,8 +206,11 @@ class DefaultScreen(Screen):
     def on_mount(self):
         self._manager.background_init(
             partial(self._pre, view=TaskType.update),
-            partial(self._post, receiver_tab=TaskType.update, setter=self._log_setter)
+            partial(self._post, receiver_tab=TaskType.update, setter=self._log_setter),
         )
+
+        for wd in it.chain(self.query("ContentTabs"), self.query("ContentTab")):
+            wd.can_focus = False
 
         def cs_watcher(cs: ContentSwitcher):
             self._set_title_from_state_change(self._manager.repos[cs.id])
@@ -115,18 +220,12 @@ class DefaultScreen(Screen):
                 continue
             self.watch(cs, 'current', partial(cs_watcher, cs))
 
-    @on(BackgroundTaskChange)
-    def task_changed(self, event):
-        match event:
-            case BackgroundTaskChange(TaskType.update):
-                pass
-        raise RuntimeError(f'Got stuff {event!r}')
-
     @on(TabbedContent.TabActivated)
     def _move_active_class(self, event):
         self.query('ContentTab').remove_class("active")
         event.tab.add_class("active")
         event.pane.query_exactly_one(ContentSwitcher).visible_content.focus()
+        self.app.refresh_bindings()
 
     async def action_show_pane(self, panename: str):
         try:
@@ -138,7 +237,9 @@ class DefaultScreen(Screen):
 
         # We already have the data, just switch view
         if active_pane.id in self._manager.results[pane]:
-            active_pane.query_one(ContentSwitcher).current = pane.name
+            cw = active_pane.query_one(ContentSwitcher)
+            cw.current = pane.name
+            cw.visible_content.focus_collapsible(None)
             return
 
         # Initial update hasn't finished yet, so impossible to get the diff args
@@ -154,13 +255,13 @@ class DefaultScreen(Screen):
                 self._manager.background_diff(
                     active_pane.id,
                     partial(self._pre, view=pane),
-                    partial(self._post, receiver_tab=pane, setter=partial(self._collapsible_setter, splitter=self._files_splitter)),
+                    partial(self._post, receiver_tab=pane, setter=partial(self._collapsible_setter, splitter=self._gen_splitter('split_into_files'))),
                 )
             case TaskType.commits | TaskType.commits_diff:
                 self._manager.background_commits(
                     active_pane.id,
                     partial(self._pre, view=pane),
-                    partial(self._post, receiver_tab=pane, setter=partial(self._collapsible_setter, splitter=self._commit_splitter)),
+                    partial(self._post, receiver_tab=pane, setter=partial(self._collapsible_setter, splitter=self._gen_splitter('split_into_commits'))),
                     with_diff=False if pane is TaskType.commits else True,
                 )
             case _:
@@ -171,6 +272,17 @@ class DefaultScreen(Screen):
 
     def action_next_tab(self):
         self.query_one('ContentTabs').action_next_tab()
+
+    @work
+    async def action_search(self):
+        match await self.app.push_screen_wait(SearchScreen(self._manager.repos)):
+            case str() as result:
+                with suppress(ValueError):
+                    self.query_one('TabbedContent#main').active = result
+            case None:
+                return
+            case _:
+                raise RuntimeError("UNREACHABLE")
 
     def set_title(self, title: OptGUIText = None, *, upper: OptGUIText = None, lower: OptGUIText = None, name: str):
         widget = self.query_one(TabbedContent).get_tab(name)
@@ -229,16 +341,24 @@ class DefaultScreen(Screen):
         self.query_one(TabbedContent).active_pane.query_one(ContentSwitcher).current = view.name
         setattr(vcs, view.name, TaskState.running)
 
-    async def _post(self, result: GUIText, *, receiver_tab: TaskType, setter: Callable[..., Awaitable], vcs: VCSWrapper, success: bool):
+    async def _post(self, result: str | tuple[str, Exception], *, receiver_tab: TaskType, setter: Callable[..., Awaitable], vcs: VCSWrapper, success: bool):
         if setter is None:
             setter = self._log_setter
+        if not success:
+            setter = self._error_setter
         setattr(
             vcs,
             receiver_tab.name,
             TaskState.finished_success if success else TaskState.finished_error,
         )
-        self.query_exactly_one(f"TabPane#{vcs.vcs.name} MyVertical#{receiver_tab.name}").loading = False
+        # self.query_exactly_one(f"TabPane#{vcs.vcs.name} MyVertical#{receiver_tab.name}").loading = False
         await setter(result, reponame=vcs.vcs.name, receiver_tab=receiver_tab)
+
+    async def _error_setter(self, error_result: tuple[str, Exception], *, reponame: str, receiver_tab: TaskType):
+        taskname, exception = error_result
+        self.notify(f'Background task {taskname} errored out with {exception}', title='Background Task Error', severity='error')
+        self.query_exactly_one(f'TabPane#{reponame} MyVertical#{receiver_tab.name}').mount(Static(f'Background Task "{taskname}" raised an error:\n\n{exception!r}'))
+        self.app.get_screen('errors').add_error(taskname, exception)
 
     async def _log_setter(self, content: GUIText, *, reponame: str, receiver_tab: TaskType):
         # await self._make_tab(reponame, receiver_tab.name)
@@ -256,33 +376,25 @@ class DefaultScreen(Screen):
                 t1 = t
                 await asyncio.sleep(0)
 
-    # async def _common_setter(
-    #     self,
-    #     raw_content: GUIText,
-    #     reponame: str,
-    #     receiver_tab: TaskType,
-    #     title_splitter: Callable[[Iterable[str]], Generator[tuple[str, str]]],
-    # ):
-
     async def _collapsible_setter(self, raw_content: GUIText, *, reponame: str, receiver_tab: TaskType, splitter: Callable[[str, VCSWrapper], Generator[tuple[str, str]]]):
         pane_vert = self.query_exactly_one(f'TabPane#{reponame} MyVertical#{receiver_tab.name}')
+        pane_vert.add_class("collapsible")
         if not pane_vert.query(Collapsible):
-            pane_vert.mount_all(
-                Collapsible(Static(rest), title=fst, collapsed=False)
+            await pane_vert.mount_all(
+                Collapsible(Static(rest), title=fst, collapsed=True)
                 for fst, rest in splitter(raw_content, repo=self._manager.repos[reponame])
             )
+        pane_vert.query_one('Collapsible>CollapsibleTitle').focus()
+        pane_vert.scroll_home()
 
     @staticmethod
-    def _commit_splitter(input: str, repo: VCSWrapper) -> Generator[tuple[str, str]]:
-        for in_ in repo.vcs.split_into_commits(input.split("\n")):
-            fst, *rest = in_.split('\n')
-            yield fst, '\n'.join(rest)
-
-    @staticmethod
-    def _files_splitter(input: str, repo: VCSWrapper) -> Generator[tuple[str, str]]:
-        for in_ in repo.vcs.split_into_files(input.split("\n")):
-            fst, *rest = in_.split('\n')
-            yield fst, '\n'.join(rest)
+    def _gen_splitter(funcname: str) -> Callable[[str, VCSWrapper], Generator[tuple[str, str]]]:
+        def splitter(input: str, repo: VCSWrapper) -> Generator[tuple[str, str]]:
+            splitfunc = getattr(repo.vcs, funcname)
+            for in_ in splitfunc(input.split("\n")):
+                fst, *rest = in_.split('\n')
+                yield fst, '\n'.join(rest)
+        return splitter
 
     def _make_tab(self, reponame: str, tabname: str) -> Awaitable:
         if reponame not in self._manager.repos:
@@ -296,9 +408,11 @@ class ReposApp(App):
     CSS_PATH = 'repos.tcss'
     BINDINGS = [
         Binding('q', 'quit', 'Quit', priority=True),
+        Binding('ctrl+e', 'push_screen("errors")', 'Show Errors', priority=True),
     ]
     SCREENS = {
         'default': DefaultScreen,
+        'errors': Errors,
     }
 
     def __init__(self, config_path: str | None):

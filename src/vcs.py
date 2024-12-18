@@ -106,11 +106,11 @@ class Git(VCS, name='git'):
         # import remote_pdb; remote_pdb.set_trace(port=11223)
         for pfile in unidiff.PatchSet(line+'\n' for line in lines):
             if pfile.is_added_file:
-                title = f"A {pfile.path}"
+                title = f"+ {pfile.path}"
             elif pfile.is_removed_file:
-                title = f"R {pfile.path}"
+                title = f"- {pfile.path}"
             elif pfile.is_modified_file:
-                title = f"M {pfile.path}"
+                title = f"📝 {pfile.path}"
             elif pfile.is_rename:
                 title = f"{pfile.source_file} -> {pfile.target_file}"
             else:

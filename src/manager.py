@@ -43,8 +43,8 @@ class VCSWrapper:
 
 
 BgCallable: TypeAlias = Callable[[], str]
-PreCallable: TypeAlias = Callable[[VCSWrapper, TaskState], Awaitable]
-PostCallable: TypeAlias = Callable[[str, VCSWrapper, bool], Awaitable]
+PreCallable: TypeAlias = Callable[[VCSWrapper], Awaitable]
+PostCallable: TypeAlias = Callable[[str | tuple[str, Exception], VCSWrapper, bool], Awaitable]
 
 
 class RepoManager:
@@ -62,12 +62,13 @@ class RepoManager:
             else:
                 result = await asyncio.get_running_loop().run_in_executor(executor, fn, *args)
         except Exception as exc:
-            # self.post_message(self.BackgroundTaskChange(task_type, State.finished_error, exc))
-            pass
+            result = asyncio.current_task().get_name(), exc
+            success = False
         else:
-            if dct is not None:
-                dct[name] = result
-            await post(result, vcs=self.repos[name], success=True)
+            success = True
+        if dct is not None:
+            dct[name] = result
+        await post(result, vcs=self.repos[name], success=success)
 
     def background_init(self, pre: PreCallable, post: PostCallable):
         self._background_tasks[TaskType.update] = {
