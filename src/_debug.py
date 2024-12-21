@@ -59,6 +59,12 @@ def do_widget_tree(ctx):
     print_ok(widget_tree(app.screen))
 
 
+@monitor_cli.command(name='screenstack')
+@auto_command_done
+def screen_stack(ctx):
+    print_ok(str(app.screen_stack))
+
+
 def task_type_completer(ctx, param, incomplete):
     from tui import TaskType
     return [vtype.name for vtype in TaskType if vtype.name.startswith(incomplete)]
