@@ -18,6 +18,10 @@ ContentTabs {
     height: 4;
 }
 
+#tabs-list {
+    height: 3;
+}
+
 ContentTab {
     border: $contenttabborder 20%;
     padding: 0;
@@ -28,6 +32,10 @@ ContentTab {
 
 ContentTab.active {
     border: $contenttabborder 80%;
+}
+
+ContentTab.hidden {
+    visibility: hidden;
 }
 
 SearchScreen {
@@ -74,4 +82,10 @@ SearchScreen Input {
     height: auto;
     /* padding: 1; */
     /* outline: solid; */
+}
+
+#errorscontainer {
+    width: auto;
+    height: auto;
+    align: center middle;
 }

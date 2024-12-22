@@ -80,7 +80,7 @@ class Git(VCS, name='git'):
         return p.stdout if p.returncode == 0 else p.stderr
 
     def diff(self, *args: str | PathLike) -> str:
-        return self.exec('git', '-C', self.dest, 'diff', *args).stdout
+        return self.exec('git', '-C', self.dest, 'diff', *args).stdout.rstrip()
 
     def commits(self, *args: str, with_diff: bool = False) -> str:
         log_with_args = ['log']
@@ -103,7 +103,6 @@ class Git(VCS, name='git'):
         yield '\n'.join(commit)
 
     def split_into_files(self, lines: Iterable[str]) -> Generator[str]:
-        # import remote_pdb; remote_pdb.set_trace(port=11223)
         for pfile in unidiff.PatchSet(line+'\n' for line in lines):
             if pfile.is_added_file:
                 title = f"+ {pfile.path}"

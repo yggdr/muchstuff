@@ -22,6 +22,7 @@ from textual.message import Message
 # from textual.message_pump import MessagePump
 from textual.suggester import SuggestFromList
 from textual.events import DescendantFocus, Focus
+from textual.widgets.tabbed_content import ContentTab, ContentTabs
 
 import vcs
 from manager import RepoManager, PreCallable, TaskState, VCSWrapper, TaskType
@@ -42,6 +43,18 @@ class MyVertical(VerticalScroll):
     ]
 
     last_focused = None
+    __scrollable = False
+
+    @property
+    def allow_vertical_scroll(self):
+        if self.__scrollable:
+            return super().allow_vertical_scroll
+        else:
+            return False
+
+    @allow_vertical_scroll.setter
+    def allow_vertical_scroll(self, newval: bool):
+        self.__scrollable = newval
 
     def action_down(self):
         if self.has_class('collapsible'):
@@ -58,11 +71,16 @@ class MyVertical(VerticalScroll):
     def action_toggle_open_all(self):
         for c in self.query(Collapsible):
             c.collapsed = not c.collapsed
+        self.call_after_refresh(self.app.refresh_bindings)
 
     def check_action(self, action: str, params) -> bool:
-        if action in ('close_all', 'open_all') and not self.has_class('collapsible'):
-            return False
-        return True
+        match action:
+            case 'toggle_open_all' if not self.has_class('collapsible'):
+                return False
+            case 'half_down' | 'half_up' if not self.allow_vertical_scroll:
+                return False
+            case _:
+                return True
 
     def action_half_down(self):
         self.scroll_to(y=self.scroll_y + self.scrollable_content_region.height / 2)
@@ -138,8 +156,8 @@ class SearchScreen(ModalScreen):
             with Horizontal(classes='searchbackground'):
                 yield SearchIcon()
                 yield Input(id='searchinput', placeholder="Reponame", suggester=SuggestFromList(self._suggestvals))
-            with Vertical(classes='candidatesbackground'):
-                yield OptionList(*self._suggestvals)
+            # with Vertical(classes='candidatesbackground'):
+            #     yield OptionList(*self._suggestvals)
 
     @on(Input.Submitted)
     def search(self, event: Input.Submitted):
@@ -163,11 +181,14 @@ class DefaultScreen(Screen):
         ('u', 'show_pane("update")', 'Show update'),
         ('d', 'show_pane("diff")', 'Show diff'),
         ('c', 'show_pane("commits")', 'Show commits'),
-        ('p', 'show_pane("commits_diff")', 'Show commits w/ patch'),
+        ('p', 'show_pane("commits_diff")', 'Show commits + patch'),
         ('h', 'previous_tab', 'Previous Tab'),
         ('l', 'next_tab', 'Next Tab'),
+        ('w', 'toggle_show_unchanged_repos', 'Toggle unchanged'),
         ('/', 'search', 'Search'),
     ]
+
+    hide_unchanged = False
 
     _char_state = (
         (TaskType.update, 'U', attrgetter('update')),
@@ -209,7 +230,7 @@ class DefaultScreen(Screen):
             partial(self._post, receiver_tab=TaskType.update, setter=self._log_setter),
         )
 
-        for wd in it.chain(self.query("ContentTabs"), self.query("ContentTab")):
+        for wd in it.chain(self.query(ContentTabs), self.query(ContentTab)):
             wd.can_focus = False
 
         def cs_watcher(cs: ContentSwitcher):
@@ -222,10 +243,33 @@ class DefaultScreen(Screen):
 
     @on(TabbedContent.TabActivated)
     def _move_active_class(self, event):
-        self.query('ContentTab').remove_class("active")
+        self.query(ContentTab).remove_class("active")
         event.tab.add_class("active")
         event.pane.query_exactly_one(ContentSwitcher).visible_content.focus()
         self.app.refresh_bindings()
+
+    def check_action(self, name: str, params):
+        match name:
+            case 'show_pane':
+                match params:
+                    case ('update', ):
+                        return True
+                    case ('diff', ) | ('commits', ) | ('commits_diff', ):
+                        try:
+                            id = self.query_exactly_one('ContentTab.-active').id
+                        except NoMatches:
+                            return False
+                        else:
+                            return bool(self._manager.runable_diff(ContentTab.sans_prefix(id)))
+                    case _:
+                        raise RuntimeError("UNREACHABLE")
+            case 'previous_tab' | 'next_tab':
+                if len([ct for ct in self.query('ContentTab') if not ct.disabled]) > 1:
+                    return True
+                else:
+                    return False
+            case _:
+                return True
 
     async def action_show_pane(self, panename: str):
         try:
@@ -268,10 +312,10 @@ class DefaultScreen(Screen):
                 raise RuntimeError("UNREACHABLE")
 
     def action_previous_tab(self):
-        self.query_one('ContentTabs').action_previous_tab()
+        self.query_one(ContentTabs).action_previous_tab()
 
     def action_next_tab(self):
-        self.query_one('ContentTabs').action_next_tab()
+        self.query_one(ContentTabs).action_next_tab()
 
     @work
     async def action_search(self):
@@ -283,6 +327,42 @@ class DefaultScreen(Screen):
                 return
             case _:
                 raise RuntimeError("UNREACHABLE")
+
+    def action_toggle_show_unchanged_repos(self):
+        self.hide_unchanged = not self.hide_unchanged
+        to_change = [ct
+            for ct in self.query(ContentTab) if (
+                self._manager.repos[ct.sans_prefix(ct.id)].update is TaskState.finished_success
+                and not self._manager.runable_diff(ct.sans_prefix(ct.id))
+            )
+        ]
+        cts = self.query_exactly_one(ContentTabs)
+        for ct in to_change:
+            ct.disabled = True if self.hide_unchanged else False
+        # The above has to happen for ALL involved Tabs BEFORE we hide them,
+        # as the internal logic of what to show/focus when a Tab gets hidden
+        # depends the surrounding Tabs disabled status. So having that change
+        # while we're still in the process of hiding stuff will fire 100s of
+        # events and block the UI for several tens of seconds for just under
+        # 20 Tabs.
+        for ct in to_change:
+            if self.hide_unchanged:
+                cts.hide(ct.sans_prefix(ct.id))
+            else:
+                cts.show(ct.sans_prefix(ct.id))
+        self.call_after_refresh(self.app.refresh_bindings)
+
+    @on(StateChange)
+    def _set_unchanged_repos(self, event: StateChange):
+        if (
+            self.hide_unchanged and
+            event.vcs.update is TaskState.finished_success and
+            not self._manager.runable_diff(event.vcs.vcs.name)
+        ):
+            ct = self.query_exactly_one(f'ContentTab#{ContentTab.add_prefix(event.vcs.vcs.name)}')
+            ct.disabled = True
+            self.query_exactly_one(ContentTabs).hide(ct.sans_prefix(ct.id))
+            self.call_after_refresh(self.app.refresh_bindings)
 
     def set_title(self, title: OptGUIText = None, *, upper: OptGUIText = None, lower: OptGUIText = None, name: str):
         widget = self.query_one(TabbedContent).get_tab(name)
@@ -381,10 +461,11 @@ class DefaultScreen(Screen):
         pane_vert.add_class("collapsible")
         if not pane_vert.query(Collapsible):
             await pane_vert.mount_all(
-                Collapsible(Static(rest), title=fst, collapsed=True)
+                Collapsible(Static(rest), title=fst, collapsed=False)
                 for fst, rest in splitter(raw_content, repo=self._manager.repos[reponame])
             )
         pane_vert.query_one('Collapsible>CollapsibleTitle').focus()
+        pane_vert.allow_vertical_scroll = True
         pane_vert.scroll_home()
 
     @staticmethod
@@ -408,7 +489,7 @@ class ReposApp(App):
     CSS_PATH = 'repos.tcss'
     BINDINGS = [
         Binding('q', 'quit', 'Quit', priority=True),
-        Binding('ctrl+e', 'push_screen("errors")', 'Show Errors', priority=True),
+        Binding('ctrl+e', 'show_error_screen', 'Show Errors', priority=True),
     ]
     SCREENS = {
         'default': DefaultScreen,
@@ -421,6 +502,10 @@ class ReposApp(App):
 
     def on_mount(self):
         self.push_screen('default')
+
+    def action_show_error_screen(self):
+        if self.get_screen('errors') not in self.screen_stack:
+            self.push_screen('errors')
 
     def _debug_run(self):
         from _debug import run_async_debug
