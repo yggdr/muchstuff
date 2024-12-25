@@ -11,21 +11,20 @@ from typing import TypeAlias
 import rich.text
 from textual import on, work
 from textual.binding import Binding
-# from textual.reactive import reactive
+from textual.reactive import reactive
 from textual.app import App
-from textual.containers import Container, HorizontalScroll, Horizontal, Right, Vertical, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.command import SearchIcon
-from textual.widgets import Collapsible, ContentSwitcher, Footer, Input, Label, LoadingIndicator, Button, OptionList, TabbedContent, TabPane, Static, Log, TextArea
+from textual.widgets import Collapsible, ContentSwitcher, Footer, Input, TabbedContent, TabPane, Static, Log
 from textual.screen import ModalScreen, Screen
 from textual.css.query import NoMatches
 from textual.message import Message
-# from textual.message_pump import MessagePump
 from textual.suggester import SuggestFromList
 from textual.events import DescendantFocus, Focus
 from textual.widgets.tabbed_content import ContentTab, ContentTabs
 
 import vcs
-from manager import RepoManager, PreCallable, TaskState, VCSWrapper, TaskType
+from manager import RepoManager, TaskState, VCSWrapper, TaskType
 
 
 GUIText: TypeAlias = str | rich.text.Text | tuple[str, str]
@@ -188,7 +187,7 @@ class DefaultScreen(Screen):
         ('/', 'search', 'Search'),
     ]
 
-    hide_unchanged = False
+    hide_unchanged = reactive(False)
 
     _char_state = (
         (TaskType.update, 'U', attrgetter('update')),
@@ -241,6 +240,57 @@ class DefaultScreen(Screen):
                 continue
             self.watch(cs, 'current', partial(cs_watcher, cs))
 
+    @on(TabbedContent.Cleared)
+    async def _show_empty_tab(self, event: TabbedContent.Cleared):
+        await event.tabbed_content.add_pane(
+            TabPane(
+                'Nothing to see',
+                ContentSwitcher(
+                    MyVertical(
+                        Static(
+                            '[italic]Nothing new[/italic]',
+                            id='__empty'
+                        ),
+                        id='__empty'
+                    ),
+                    id='__empty',
+                    initial='__empty'
+                ),
+                id='__empty'
+            )
+        )
+        event.tabbed_content.active = '__empty'
+
+    async def watch_hide_unchanged(self, hide: bool):
+        tc = self.query_exactly_one(TabbedContent)
+        if not hide:
+            with suppress(ValueError):
+                await tc.remove_pane('__empty')
+
+        to_change = [ct
+            for ct in self.query(ContentTab) if (
+                self._manager.repos[ct.sans_prefix(ct.id)].update is TaskState.finished_success
+                and not self._manager.runable_diff(ct.sans_prefix(ct.id))
+            )
+        ]
+        cts = self.query_exactly_one(ContentTabs)
+        for ct in to_change:
+            ct.disabled = True if hide else False
+        # The above has to happen for ALL involved Tabs BEFORE we hide them,
+        # as the internal logic of what to show/focus when a Tab gets hidden
+        # depends the surrounding Tabs disabled status. So having that change
+        # while we're still in the process of hiding stuff will fire 100s of
+        # events and block the UI for several tens of seconds for just under
+        # 20 Tabs.
+        for ct in to_change:
+            if hide:
+                cts.hide(ct.sans_prefix(ct.id))
+            else:
+                cts.show(ct.sans_prefix(ct.id))
+        if tc.active == '__empty':
+            tc.active = tc.query_one(TabPane).id
+        self.call_after_refresh(self.app.refresh_bindings)
+
     @on(TabbedContent.TabActivated)
     def _move_active_class(self, event):
         self.query(ContentTab).remove_class("active")
@@ -253,7 +303,7 @@ class DefaultScreen(Screen):
             case 'show_pane':
                 match params:
                     case ('update', ):
-                        return True
+                        return self.query_exactly_one(TabbedContent).active != '__empty'
                     case ('diff', ) | ('commits', ) | ('commits_diff', ):
                         try:
                             id = self.query_exactly_one('ContentTab.-active').id
@@ -268,6 +318,8 @@ class DefaultScreen(Screen):
                     return True
                 else:
                     return False
+            case 'search':
+                return self.query_exactly_one(TabbedContent).active != '__empty'
             case _:
                 return True
 
@@ -330,27 +382,6 @@ class DefaultScreen(Screen):
 
     def action_toggle_show_unchanged_repos(self):
         self.hide_unchanged = not self.hide_unchanged
-        to_change = [ct
-            for ct in self.query(ContentTab) if (
-                self._manager.repos[ct.sans_prefix(ct.id)].update is TaskState.finished_success
-                and not self._manager.runable_diff(ct.sans_prefix(ct.id))
-            )
-        ]
-        cts = self.query_exactly_one(ContentTabs)
-        for ct in to_change:
-            ct.disabled = True if self.hide_unchanged else False
-        # The above has to happen for ALL involved Tabs BEFORE we hide them,
-        # as the internal logic of what to show/focus when a Tab gets hidden
-        # depends the surrounding Tabs disabled status. So having that change
-        # while we're still in the process of hiding stuff will fire 100s of
-        # events and block the UI for several tens of seconds for just under
-        # 20 Tabs.
-        for ct in to_change:
-            if self.hide_unchanged:
-                cts.hide(ct.sans_prefix(ct.id))
-            else:
-                cts.show(ct.sans_prefix(ct.id))
-        self.call_after_refresh(self.app.refresh_bindings)
 
     @on(StateChange)
     def _set_unchanged_repos(self, event: StateChange):

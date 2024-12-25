@@ -39,6 +39,11 @@ ContentTab.hidden {
     visibility: hidden;
 }
 
+ContentTab#--content-tab-__empty {
+    width: 100%;
+    border: solid $accent-lighten-3;
+}
+
 SearchScreen {
     align: center middle;
 }
