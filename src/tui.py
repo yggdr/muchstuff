@@ -486,7 +486,7 @@ class DefaultScreen(Screen):
 
 
 class ReposApp(App):
-    CSS_PATH = 'repos.tcss'
+    CSS_PATH = 'tui.tcss'
     BINDINGS = [
         Binding('q', 'quit', 'Quit', priority=True),
         Binding('ctrl+e', 'show_error_screen', 'Show Errors', priority=True),
