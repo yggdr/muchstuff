@@ -26,6 +26,7 @@ ContentTab {
     border: $contenttabborder 20%;
     padding: 0;
     height: 3;
+    min-width: 10;
     border-title-align: right;
     border-subtitle-align: right;
 }
