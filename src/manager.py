@@ -1,4 +1,5 @@
 import asyncio
+import atexit
 from collections.abc import Awaitable, Callable, Mapping, MutableMapping
 import concurrent.futures as cf
 import dataclasses
@@ -51,10 +52,14 @@ class RepoManager:
     def __init__(self, repos: Mapping[str, vcs.VCS], state_change_cb: ScCallable = None, *args, **kwargs):
         self.repos: dict[str, VCSWrapper] = {name: VCSWrapper(repo, state_change_cb=state_change_cb) for name, repo in repos.items()}
         self._executor = cf.ProcessPoolExecutor()
+        atexit.register(self.close)
         self._background_tasks: dict[TaskType, dict[str, Awaitable]] = {vt: {} for vt in TaskType}
         self.results: dict[TaskType, dict[str, str]] = {vt: {} for vt in TaskType}
 
     def __del__(self):
+        self.close()
+
+    def close(self):
         self._executor.shutdown()
 
     async def _background(self, executor: cf.Executor | None, fn: BgCallable, *args: Any, pre: PreCallable, post: PostCallable, name: str, dct: MutableMapping | None = None):
