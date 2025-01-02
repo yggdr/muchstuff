@@ -9,7 +9,11 @@ try:
 except ImportError:
     import tomli as tomllib
 import textwrap
-from typing import Any, ClassVar, Self
+from typing import Any, ClassVar
+try:
+    from typing import Self
+except ImportError:
+    from typing_extensions import Self
 
 import unidiff
 
@@ -38,9 +42,9 @@ class VCS(metaclass=abc.ABCMeta):
     def get_vcs(cls, vcsname: str, repo_info: dict[str, Any]) -> Self:
         return cls.VCS[vcsname](repo_info)
 
-    def __init_subclass__(cls, /, name: str, altnames: Iterable[str] | None = None, **kw):
+    def __init_subclass__(cls, /, vcsname: str, altnames: Iterable[str] | None = None, **kw):
         super().__init_subclass__(**kw)
-        cls.VCS[name] = cls
+        cls.VCS[vcsname] = cls
         if altnames is not None:
             for altname in altnames:
                 cls.VCS[altname] = cls
@@ -91,7 +95,7 @@ Err: "{cpe.stderr}"''')
         return self.update if self.dest.exists() else self.clone
 
 
-class Git(VCS, name='git'):
+class Git(VCS, vcsname='git'):
     def clone(self) -> str:
         # Git clone always outputs to stderr when being piped
         return self.exec('git', 'clone', self.source, self.dest).stderr
@@ -146,7 +150,7 @@ class Git(VCS, name='git'):
                 return (line[len(prefix):], )
 
 
-class Mercurial(VCS, name='mercurial', altnames=['hg']):
+class Mercurial(VCS, vcsname='mercurial', altnames=['hg']):
     def clone(self) -> str:
         p = self.exec('hg', 'clone', self.source, self.dest)
         return p.stdout if p.returncode == 0 else p.stderr

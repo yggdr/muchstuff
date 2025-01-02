@@ -6,7 +6,11 @@ import concurrent.futures as cf
 import dataclasses
 import enum
 from functools import partial
-from typing import Any, Literal, Self, TypeAlias
+from typing import Any, Literal, TypeAlias
+try:
+    from typing import Self
+except ImportError:
+    from typing_extensions import Self
 
 import vcs
 
