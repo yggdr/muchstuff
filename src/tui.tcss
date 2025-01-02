@@ -90,8 +90,72 @@ SearchScreen Input {
     /* outline: solid; */
 }
 
-#errorscontainer {
-    width: auto;
-    height: auto;
+Errors {
     align: center middle;
+    #errorscontainer {
+        width: auto;
+        height: auto;
+        align: center middle;
+        .error {
+            min-width: 105;
+            width: auto;
+            height: auto;
+        }
+    }
+}
+
+DefaultScreen {
+    layers: default counter;
+}
+
+#donecounter {
+    layer: counter;
+    offset-y: 3;
+    /* background: $secondary; */
+    width: auto;
+    dock: right;
+    /* foreground: $primary; */
+    &.finished {
+        /* visibility: hidden; */
+    }
+}
+
+.log {
+    min-height: 100%;
+    height: auto;
+    overflow: auto auto;
+}
+
+.error-output {
+    margin-top: 1;
+}
+
+CriticalError {
+    align: center middle;
+    #error {
+        border: panel red;
+        border-title-align: center;
+        align: center middle;
+        text-align: center;
+        min-width: 25%;
+        width: auto;
+        height: auto;
+        #error-content {
+            min-width: 100;
+        }
+        #error-label {
+            align: center middle;
+            /* text-align: center; */
+            width: 100%;
+            color: $error;
+            margin: 1;
+        }
+        #error-collapsible {
+            width: auto;
+            min-width: 105;
+        }
+        Center {
+            width: 100%;
+        }
+    }
 }

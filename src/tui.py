@@ -6,16 +6,21 @@ from functools import partial
 import itertools as it
 from operator import attrgetter
 import time
+try:
+    import tomllib
+except ImportError:
+    import tomli as tomllib
 from typing import TypeAlias
 
 import rich.text
+from rich.traceback import Traceback
 from textual import on, work
 from textual.binding import Binding
 from textual.reactive import reactive
 from textual.app import App
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll, Center
 from textual.command import SearchIcon
-from textual.widgets import Collapsible, ContentSwitcher, Footer, Input, TabbedContent, TabPane, Static, Log
+from textual.widgets import Collapsible, ContentSwitcher, Footer, Input, TabbedContent, TabPane, Static, Log, RichLog, Label, Button
 from textual.screen import ModalScreen, Screen
 from textual.css.query import NoMatches
 from textual.message import Message
@@ -28,7 +33,7 @@ from manager import RepoManager, TaskState, VCSWrapper, TaskType
 
 
 GUIText: TypeAlias = str | rich.text.Text | tuple[str, str]
-OptGUIText: TypeAlias = GUIText
+OptGUIText: TypeAlias = GUIText | None
 # TODO change to Protocols with __call__?
 
 
@@ -88,12 +93,14 @@ class MyVertical(VerticalScroll):
         self.scroll_to(y=self.scroll_y - self.scrollable_content_region.height / 2)
 
     @on(Focus)
-    def focus_collapsible(self, event: Focus | None):
+    def focus_self_or_collapsible(self, event: Focus | None = None):
         if self.last_focused is not None:
             self.last_focused.focus()
         else:
-            with suppress(NoMatches):
+            try:
                 self.query("CollapsibleTitle").first().focus()
+            except NoMatches:
+                self.focus()
 
     @on(DescendantFocus)
     def focus_within(self, event: DescendantFocus):
@@ -109,6 +116,21 @@ class MyVertical(VerticalScroll):
     # def watch_loading(self, old: bool, new: bool) -> None:
     #     if self.is_on_screen:
     #         self.focus()
+
+
+class DoneCounter(Static):
+    counter = reactive(0)
+
+    def __init__(self, *args, max: int, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.max = max
+        self.watch_counter()
+
+    def validate_counter(self, val):
+        return min(max(val, 0), self.max)  # clamp(val, 0, max)
+
+    def watch_counter(self):
+        self.update(f'{self.counter:{len(str(self.max))}}/{self.max}')
 
 
 @dataclasses.dataclass
@@ -133,12 +155,14 @@ class Errors(ModalScreen):
             )
 
     def compose(self):
-        with VerticalScroll(id='errorscontainer'):
+        yield Label('Captured Errors:')
+        with VerticalScroll(id='errorscontainer', can_focus=False):
             for taskname, exception in self._errors:
                 yield self._error_view(taskname, exception)
 
     def _error_view(self, taskname: str, exception: Exception):
-        return Collapsible(Static(repr(exception)), title=taskname, collapsed=False)
+        tb = Traceback.from_exception(type(exception), exception, exception.__traceback__)
+        return Collapsible(Static(tb), title=f'{taskname}: {exception!r}', collapsed=True, classes="error")
 
 
 class SearchScreen(ModalScreen):
@@ -175,6 +199,32 @@ class SearchScreen(ModalScreen):
             )
 
 
+class CriticalError(ModalScreen):
+    AUTO_FOCUS = Button
+
+    def __init__(self, error: Exception, msg: GUIText = "", *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._error = error
+        self._msg = msg if msg else "A Critical Error has occured"
+
+    def compose(self):
+        tb = Traceback.from_exception(type(self._error), self._error, self._error.__traceback__)
+        tb_short = Traceback.from_exception(type(self._error), self._error, None)
+
+        with Vertical(id='error') as V:
+            V.border_title = rich.text.Text.assemble((" ❌ Critical Error! ", 'bold dark_red on white'))
+            yield Label(self._msg, id='error-label')
+            yield Static(tb_short, id='error-short-content')
+            with Collapsible(title='Detailed Traceback', collapsed=True, id='error-collapsible'):
+                yield Static(tb, id='error-content')
+            with Center():
+                yield Button("Exit", variant="error")
+
+    @on(Button.Pressed)
+    def exit_app(self, event: Button.Pressed):
+        self.app.exit()
+
+
 class DefaultScreen(Screen):
     BINDINGS = [
         ('u', 'show_pane("update")', 'Show update'),
@@ -204,15 +254,24 @@ class DefaultScreen(Screen):
     }
 
     def __init__(self):
-        # def cb(vcs: VCSWrapper, changed_state:TaskType, new_state: TaskState) -> None:
-        #     self.post_message(StateChange(vcs, changed_state, new_state))
-
         super().__init__()
-        self._manager = RepoManager(
-            {repo.name: repo for repo in vcs.get_repos(self.app._config_path)},
-            # state_change_cb = cb,
-            state_change_cb = lambda vcs: self.post_message(StateChange(vcs)),
-        )
+        try:
+            self._manager = RepoManager(
+                {repo.name: repo for repo in vcs.get_repos(self.app._config_path)},
+                state_change_cb = lambda vcs: self.post_message(StateChange(vcs)),
+            )
+        except (FileNotFoundError, tomllib.TOMLDecodeError) as exc:
+            self._manager = RepoManager({})
+            self._empty_message = '[bold red]CRITICAL ERROR[/bold red]'
+            self.call_after_refresh(self.app.push_screen, CriticalError(exc, "Error reading configuration"))
+        else:
+            self._empty_message = '[italic]Nothing new[/italic]'
+
+    def __del__(self):
+        self.shutdown()
+
+    def shutdown(self, *, force: bool = False):
+        self._manager.shutdown(force=force)
 
     def compose(self):
         with TabbedContent(id="main"):
@@ -220,10 +279,14 @@ class DefaultScreen(Screen):
                 with TabPane(reponame, id=reponame):
                     with ContentSwitcher(initial='update', id=reponame):
                         with MyVertical(id='update'):
-                            yield Log(id='update', auto_scroll=False)
+                            yield Log(id='update', auto_scroll=False, classes="log")
         yield Footer()
+        yield DoneCounter(id='donecounter', max=len(self._manager.repos))
 
     def on_mount(self):
+        if not len(self._manager.repos):
+            self.post_message(TabbedContent.Cleared(self.query_exactly_one(TabbedContent)))
+
         self._manager.background_init(
             partial(self._pre, view=TaskType.update),
             partial(self._post, receiver_tab=TaskType.update, setter=self._log_setter),
@@ -248,7 +311,7 @@ class DefaultScreen(Screen):
                 ContentSwitcher(
                     MyVertical(
                         Static(
-                            '[italic]Nothing new[/italic]',
+                            self._empty_message,
                             id='__empty'
                         ),
                         id='__empty'
@@ -335,7 +398,7 @@ class DefaultScreen(Screen):
         if active_pane.id in self._manager.results[pane]:
             cw = active_pane.query_one(ContentSwitcher)
             cw.current = pane.name
-            cw.visible_content.focus_collapsible(None)
+            cw.visible_content.focus_self_or_collapsible()
             return
 
         # Initial update hasn't finished yet, so impossible to get the diff args
@@ -382,6 +445,13 @@ class DefaultScreen(Screen):
 
     def action_toggle_show_unchanged_repos(self):
         self.hide_unchanged = not self.hide_unchanged
+
+    @on(StateChange)
+    def _update_count(self, event: StateChange):
+        if not (dc := self.query_exactly_one(DoneCounter)).has_class('finished'):
+            dc.counter = sum(1 for r in self._manager.repos.values() if r.update in {TaskState.finished_success, TaskState.finished_error})
+            if dc.counter == len(self._manager.repos):
+                dc.add_class('finished')
 
     @on(StateChange)
     def _set_unchanged_repos(self, event: StateChange):
@@ -453,10 +523,10 @@ class DefaultScreen(Screen):
         setattr(vcs, view.name, TaskState.running)
 
     async def _post(self, result: str | tuple[str, Exception], *, receiver_tab: TaskType, setter: Callable[..., Awaitable], vcs: VCSWrapper, success: bool):
-        if setter is None:
-            setter = self._log_setter
         if not success:
             setter = self._error_setter
+        elif setter is None:
+            setter = self._log_setter
         setattr(
             vcs,
             receiver_tab.name,
@@ -467,16 +537,28 @@ class DefaultScreen(Screen):
 
     async def _error_setter(self, error_result: tuple[str, Exception], *, reponame: str, receiver_tab: TaskType):
         taskname, exception = error_result
-        self.notify(f'Background task {taskname} errored out with {exception}', title='Background Task Error', severity='error')
-        self.query_exactly_one(f'TabPane#{reponame} MyVertical#{receiver_tab.name}').mount(Static(f'Background Task "{taskname}" raised an error:\n\n{exception!r}'))
         self.app.get_screen('errors').add_error(taskname, exception)
+        tb = Traceback.from_exception(type(exception), exception, exception.__traceback__, show_locals=True)
+        self.notify(f'Background task {taskname} errored out with {exception}', title='Background Task Error', severity='error')
+        vert = self.query_exactly_one(f'TabPane#{reponame} MyVertical#{receiver_tab.name}')
+        vert.remove_children()
+        await vert.mount_all((
+            Static(f'Background Task "{taskname}" raised an error:\n{exception}'),
+            Collapsible(
+                RichLog(id='error-log', classes="log").write(tb),
+                title="Detailed Traceback",
+                collapsed=True,
+                classes='error-output'
+            ),
+        ))
+        vert.allow_vertical_scroll = True
 
     async def _log_setter(self, content: GUIText, *, reponame: str, receiver_tab: TaskType):
         # await self._make_tab(reponame, receiver_tab.name)
         try:
             log = self.query_exactly_one(f'TabPane#{reponame} MyVertical#{receiver_tab.name} Log#{receiver_tab.name}')
         except NoMatches:
-            log = Log(id=receiver_tab.name, auto_scroll=False)
+            log = Log(id=receiver_tab.name, auto_scroll=False, classes="log")
             self.query_exactly_one(f'TabPane#{reponame} MyVertical#{receiver_tab.name}').mount(log)
         log.clear()
         logwriter = log.write_line
@@ -486,6 +568,7 @@ class DefaultScreen(Screen):
             if (t := time.monotonic()) - t1 >= .012:
                 t1 = t
                 await asyncio.sleep(0)
+        self.query_exactly_one(f'TabPane#{reponame} MyVertical#{receiver_tab.name}').allow_vertical_scroll = True
 
     async def _collapsible_setter(self, raw_content: GUIText, *, reponame: str, receiver_tab: TaskType, splitter: Callable[[str, VCSWrapper], Generator[tuple[str, str]]]):
         pane_vert = self.query_exactly_one(f'TabPane#{reponame} MyVertical#{receiver_tab.name}')
@@ -519,8 +602,8 @@ class DefaultScreen(Screen):
 class ReposApp(App):
     CSS_PATH = 'tui.tcss'
     BINDINGS = [
-        Binding('q', 'quit', 'Quit', priority=True),
-        Binding('ctrl+e', 'show_error_screen', 'Show Errors', priority=True),
+        ('q', 'quit', 'Quit'),
+        Binding('ctrl+e', 'show_error_screen', 'Show Errors', priority=True, show=False),
     ]
     SCREENS = {
         'default': DefaultScreen,
@@ -537,6 +620,10 @@ class ReposApp(App):
     def action_show_error_screen(self):
         if self.get_screen('errors') not in self.screen_stack:
             self.push_screen('errors')
+
+    def action_quit(self):
+        self.get_screen('default').shutdown()
+        super().exit()
 
     def _debug_run(self):
         from _debug import run_async_debug

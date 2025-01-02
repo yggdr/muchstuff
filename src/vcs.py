@@ -4,10 +4,22 @@ from os import PathLike
 from pathlib import Path
 import re
 import subprocess
-import tomllib
+try:
+    import tomllib
+except ImportError:
+    import tomli as tomllib
+import textwrap
 from typing import Any, ClassVar, Self
 
 import unidiff
+
+
+class VCSError(Exception):
+    pass
+
+
+class VCSOperationError(VCSError):
+    pass
 
 
 class VCS(metaclass=abc.ABCMeta):
@@ -17,7 +29,7 @@ class VCS(metaclass=abc.ABCMeta):
     source: Path
 
     def __init__(self, attrs: Mapping[str, Any]):
-        if not {'name', 'dest', 'source'} < attrs.keys():
+        if not {'name', 'dest', 'source'} <= attrs.keys():
             raise RuntimeError('name, source, and dest are required')
         for name, value in attrs.items():
             setattr(self, name, value)
@@ -34,7 +46,16 @@ class VCS(metaclass=abc.ABCMeta):
                 cls.VCS[altname] = cls
 
     def exec(self, *proc_args: PathLike | str) -> subprocess.CompletedProcess:
-        return subprocess.run(proc_args, capture_output=True, text=True)
+        try:
+            return subprocess.run(proc_args, capture_output=True, text=True, check=True)
+        except subprocess.CalledProcessError as cpe:
+            raise VCSOperationError(
+                textwrap.dedent(f'''
+Error while working in repo {self.name}:
+{cpe.cmd} returned code {cpe.returncode}:
+Output: "{cpe.stdout}"
+Err: "{cpe.stderr}"''')
+            ) from cpe
 
     @abc.abstractmethod
     def clone(self) -> str:
@@ -169,7 +190,7 @@ class Mercurial(VCS, name='mercurial', altnames=['hg']):
 
 
 def get_repos(configpath: Path | str | None = None) -> Generator[VCS, None, None]:
-    with open(Path(configpath if configpath is not None else '~/.config/repos.toml').expanduser(), 'rb') as conffile:
+    with open(Path(configpath if configpath is not None else '~/.config/muchstuff.toml').expanduser(), 'rb') as conffile:
         conf = tomllib.load(conffile)
     _DEFAULTS = conf.pop('_DEFAULTS', {})
     for name, repo_info in conf.items():

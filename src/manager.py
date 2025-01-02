@@ -1,6 +1,7 @@
 import asyncio
 import atexit
 from collections.abc import Awaitable, Callable, Mapping, MutableMapping
+from contextlib import suppress
 import concurrent.futures as cf
 import dataclasses
 import enum
@@ -52,15 +53,21 @@ class RepoManager:
     def __init__(self, repos: Mapping[str, vcs.VCS], state_change_cb: ScCallable = None, *args, **kwargs):
         self.repos: dict[str, VCSWrapper] = {name: VCSWrapper(repo, state_change_cb=state_change_cb) for name, repo in repos.items()}
         self._executor = cf.ProcessPoolExecutor()
-        atexit.register(self.close)
+        atexit.register(self.shutdown, force=True)
         self._background_tasks: dict[TaskType, dict[str, Awaitable]] = {vt: {} for vt in TaskType}
         self.results: dict[TaskType, dict[str, str]] = {vt: {} for vt in TaskType}
 
     def __del__(self):
-        self.close()
+        self.shutdown(force=True)
 
-    def close(self):
-        self._executor.shutdown()
+    def shutdown(self, *, force: bool = False):
+        with suppress(Exception):
+            for proc in self._executor._processes.values():
+                proc.terminate()
+        with suppress(Exception):
+            for proc in self._executor._processes.values():
+                proc.kill()
+        self._executor.shutdown(cancel_futures=force)
 
     async def _background(self, executor: cf.Executor | None, fn: BgCallable, *args: Any, pre: PreCallable, post: PostCallable, name: str, dct: MutableMapping | None = None):
         await pre(vcs=self.repos[name])
@@ -96,7 +103,7 @@ class RepoManager:
     def runable_diff(self, reponame: str) -> str | Literal[False]:
         try:
             difftxt = self.repos[reponame].vcs.get_diff_args_from_update_msg(self.results[TaskType.update][reponame])
-        except KeyError:
+        except Exception:
             return False
         if difftxt is None:
             return False
