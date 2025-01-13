@@ -12,7 +12,7 @@ try:
 except ImportError:
     from typing_extensions import Self
 
-import vcs
+from . import vcs
 
 
 class TaskState(enum.Enum):

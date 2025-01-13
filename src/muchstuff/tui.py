@@ -28,8 +28,8 @@ from textual.suggester import SuggestFromList
 from textual.events import DescendantFocus, Focus
 from textual.widgets.tabbed_content import ContentTab, ContentTabs
 
-import vcs
-from manager import RepoManager, TaskState, VCSWrapper, TaskType
+from . import vcs
+from .manager import RepoManager, TaskState, VCSWrapper, TaskType
 
 
 GUIText: TypeAlias = str | rich.text.Text | tuple[str, str]

@@ -2,14 +2,14 @@ import argparse
 
 from textual.app import App
 
-from tui import ReposApp
+from .tui import ReposApp
 
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument('-v', '--verbose', action='count', default=0)
-    parser.add_argument('-d', '--debug', action='store_true')
-    parser.add_argument('-g', '--config', default=None)
+    # parser.add_argument('-v', '--verbose', help="More verbose output; can be given multiple times", action='count', default=0)
+    parser.add_argument('-d', '--debug', help='Run in debug mode (dev-dependencies are needed for this!)', action='store_true')
+    parser.add_argument('-c', '--config', help='Use alternative config file', default=None)
     return parser.parse_args()
 
 
