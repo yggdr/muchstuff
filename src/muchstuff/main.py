@@ -1,4 +1,6 @@
 import argparse
+import os
+import sys
 
 from textual.app import App
 
@@ -10,7 +12,8 @@ def parse_args():
     # parser.add_argument('-v', '--verbose', help="More verbose output; can be given multiple times", action='count', default=0)
     parser.add_argument('-d', '--debug', help='Run in debug mode (dev-dependencies are needed for this!)', action='store_true')
     parser.add_argument('-c', '--config', help='Use alternative config file', default=None)
-    return parser.parse_args()
+    parser.add_argument('-V', '--version', help='Print version and exit', action='store_true')
+    return parser.parse_args(namespace=argparse.Namespace(prog=parser.prog))
 
 
 def _run(app: App, debug: bool):
@@ -20,9 +23,14 @@ def _run(app: App, debug: bool):
         return app.run()
 
 
-def main(args=None) -> int:
+def main(args: argparse.Namespace | None = None) -> int:
     if args is None:
         args = parse_args()
+
+    if args.version:
+        from . import __version__
+        print(args.prog, __version__)
+        sys.exit(os.EX_OK)
 
     app = ReposApp(args.config)
     result = _run(app, args.debug)
@@ -34,5 +42,4 @@ def main(args=None) -> int:
 
 
 if __name__ == "__main__":
-    import sys
     sys.exit(main())
