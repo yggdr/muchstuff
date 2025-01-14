@@ -16,7 +16,7 @@ To automate the latter part of pulling the new stuff and viewing the diff, I
 decided to write a little helper tool. There are of course quite a few tools
 out there that keep a list of repositories synchronised, but getting them to
 let me view the changes how I wanted to didn't seem easily possible. Coupled
-with my desire to test out the (https://textual.textualize.io)[textual] TUI
+with my desire to test out the [textual](https://textual.textualize.io) TUI
 framework lead to me writing this.
 
 ## How?
