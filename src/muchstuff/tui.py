@@ -626,5 +626,5 @@ class ReposApp(App):
         super().exit()
 
     def _debug_run(self):
-        from _debug import run_async_debug
+        from ._debug import run_async_debug
         return asyncio.run(run_async_debug(self))

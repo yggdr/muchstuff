@@ -35,7 +35,7 @@ def widget_tree(root: Widget, indent: int = 0, increase: int = 4, ignore: Iterab
 
 
 def _tasks(task_type: str):
-    from tui import TaskType
+    from .tui import TaskType
     table = [('Type', 'Repo Name', 'Task ID', 'State')]
     match task_type:
         case 'all':
@@ -66,7 +66,7 @@ def screen_stack(ctx):
 
 
 def task_type_completer(ctx, param, incomplete):
-    from tui import TaskType
+    from .tui import TaskType
     return [vtype.name for vtype in TaskType if vtype.name.startswith(incomplete)]
 
 
@@ -78,7 +78,7 @@ def repo_name_completer(ctx, param, incomplete):
 @click.argument('repo_name', shell_complete=repo_name_completer)
 @auto_command_done
 def taskps(ctx, task_type: str, repo_name: str):
-    from tui import TaskType
+    from .tui import TaskType
     try:
         task = app.screen._manager._background_tasks[TaskType[task_type]][repo_name]
     except LookupError as lue:
@@ -116,7 +116,7 @@ async def run_async_debug(myapp):
     import remote_pdb
     from functools import partial
     sys.breakpointhook = partial(remote_pdb.set_trace, port=11223)
-    from tui import TaskType
+    from .tui import TaskType
     app = myapp
     loop = asyncio.get_running_loop()
     with aiomonitor.start_monitor(loop, locals=locals() | {"app": app, "s": asyncio.sleep, "T": TaskType}):
