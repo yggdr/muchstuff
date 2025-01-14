@@ -1,0 +1,61 @@
+[project]
+name = "muchstuff"
+description = "A TUI helper to keep code repositories up to date"
+authors = [
+    { name = "Konstantin Schukraft", email = "muchstuff@schukraft.org" },
+]
+dynamic = ["version"]
+dependencies = [
+    "textual>=1.0.0",
+    "tomli>=2.2.0 ; python_full_version < '3.11'",
+    "typing-extensions>=4.12.2 ; python_full_version < '3.11'",
+    "unidiff",
+]
+readme = "README.md"
+requires-python = ">= 3.10"
+license = { file = "LICENSE" }
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: ISC License (ISCL)",
+    "Natural Language :: English",
+    "Operating System :: POSIX",
+    "Operating System :: Unix",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development",
+    "Topic :: Software Development :: Version Control :: Git",
+    "Topic :: Utilities",
+]
+
+[project.urls]
+homepage = "https://github.com/yggdr/muchstuff"
+github = "https://github.com/yggdr/muchstuff"
+
+[project.scripts]
+"muchstuff" = "muchstuff:main"
+
+[dependency-groups]
+dev = [
+    'aiomonitor',
+    'remote-pdb',
+    'textual-dev',
+    'nox',
+    "muchstuff",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/muchstuff/__init__.py"
+
+[tool.uv.sources]
+muchstuff = { workspace = true }
