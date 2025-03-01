@@ -247,7 +247,7 @@ class DefaultScreen(Screen):
     )
 
     state_colors = {
-        TaskState.initial: "grey",
+        TaskState.initial: "grey66",
         TaskState.running: "yellow",
         TaskState.finished_success: "green",
         TaskState.finished_error: "red",
