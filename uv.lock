@@ -521,6 +521,12 @@ dependencies = [
     { name = "unidiff" },
 ]
 
+[package.optional-dependencies]
+debug = [
+    { name = "aiomonitor" },
+    { name = "remote-pdb" },
+]
+
 [package.dev-dependencies]
 dev = [
     { name = "aiomonitor" },
@@ -532,9 +538,11 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "textual", specifier = ">=1.0.0" },
-    { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2.2.0" },
-    { name = "typing-extensions", marker = "python_full_version < '3.11'", specifier = ">=4.12.2" },
+    { name = "aiomonitor", marker = "extra == 'debug'" },
+    { name = "remote-pdb", marker = "extra == 'debug'" },
+    { name = "textual", specifier = ">=1.0.0,<3" },
+    { name = "tomli", marker = "python_full_version < '3.11'", specifier = "~=2.2.0" },
+    { name = "typing-extensions", marker = "python_full_version < '3.11'", specifier = "~=4.12.2" },
     { name = "unidiff" },
 ]
 

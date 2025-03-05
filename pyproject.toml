@@ -6,9 +6,9 @@ authors = [
 ]
 dynamic = ["version"]
 dependencies = [
-    "textual>=1.0.0",
-    "tomli>=2.2.0 ; python_full_version < '3.11'",
-    "typing-extensions>=4.12.2 ; python_full_version < '3.11'",
+    "textual>=1.0.0, <3",
+    "tomli~=2.2.0 ; python_full_version < '3.11'",
+    "typing-extensions~=4.12.2 ; python_full_version < '3.11'",
     "unidiff",
 ]
 readme = "README.md"
@@ -40,6 +40,12 @@ github = "https://github.com/yggdr/muchstuff"
 
 [project.scripts]
 "muchstuff" = "muchstuff:main"
+
+[project.optional-dependencies]
+debug = [
+    'aiomonitor',
+    'remote-pdb'
+]
 
 [dependency-groups]
 dev = [
